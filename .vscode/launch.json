@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "J-Link Debug (STM32F407VE)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/test.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "servertype": "jlink",
+            "device": "STM32F407VE",
+            "interface": "swd",
+            "svdFile": "",
+            "runToEntryPoint": "main",
+            "preLaunchTask": "build",
+            "armToolchainPath": "${env:LOCALAPPDATA}/arm-gnu-toolchain/bin"
+        }
+    ]
+}
