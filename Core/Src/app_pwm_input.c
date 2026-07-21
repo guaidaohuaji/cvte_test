@@ -56,9 +56,9 @@ bool AppPwmInput_Init(void)
     rise_valid    = false;
     fall_valid    = false;
     ovc_count     = 0U;
-    raw_valid     = false;
-    raw_synced    = false;
-    capture_seq   = 0U;
+    raw_valid      = false;
+    raw_synced     = false;
+    capture_seq    = 0U;
 
     expected_edge = (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_9) == GPIO_PIN_SET)
                     ? EXPECT_FALLING : EXPECT_RISING;
@@ -91,7 +91,8 @@ void AppPwmInput_CC_Callback(TIM_HandleTypeDef *htim)
         synchronized = false;
         rise_valid   = false;
         fall_valid   = false;
-        raw_synced   = false;
+        raw_valid     = false;
+        raw_synced    = false;
         expected_edge = (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_9) == GPIO_PIN_SET)
                         ? EXPECT_FALLING : EXPECT_RISING;
         return;

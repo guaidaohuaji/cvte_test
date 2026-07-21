@@ -2,6 +2,7 @@
 #include "app_pwm.h"
 #include "app_pwm_input.h"
 #include "app_ntc.h"
+#include "app_fan.h"
 #include "usart.h"
 #include <stdbool.h>
 
@@ -21,6 +22,7 @@
 #define OBJ_PWM_IN   0x03U
 #define OBJ_PD13     0x04U
 #define OBJ_NTC      0x05U
+#define OBJ_FAN      0x06U
 
 #define STATUS_OK                    0x00U
 #define STATUS_LENGTH_ERROR          0x01U
@@ -216,6 +218,36 @@ static void process_a1_query(const uint8_t *data, uint8_t len)
         SendW2Frame(TYPE_QUERY, d, 3U);
         break;
     }
+    case OBJ_FAN:
+    {
+        AppFanSnapshot s;
+        if (!AppFan_GetSnapshot(&s))
+        {
+            send_error(TYPE_QUERY, STATUS_HW_ERROR, OBJ_FAN);
+            return;
+        }
+        uint8_t d[18];
+        d[0]  = STATUS_OK;
+        d[1]  = OBJ_FAN;
+        d[2]  = (uint8_t)s.state;
+        d[3]  = s.enabled ? 1U : 0U;
+        d[4]  = (uint8_t)s.target_duty_x100;
+        d[5]  = (uint8_t)(s.target_duty_x100 >> 8);
+        d[6]  = (uint8_t)s.applied_duty_x100;
+        d[7]  = (uint8_t)(s.applied_duty_x100 >> 8);
+        d[8]  = (uint8_t)s.pwm_frequency_hz;
+        d[9]  = (uint8_t)(s.pwm_frequency_hz >> 8);
+        d[10] = (uint8_t)s.fg_frequency_millihz;
+        d[11] = (uint8_t)(s.fg_frequency_millihz >> 8);
+        d[12] = (uint8_t)(s.fg_frequency_millihz >> 16);
+        d[13] = (uint8_t)(s.fg_frequency_millihz >> 24);
+        d[14] = (uint8_t)s.rpm;
+        d[15] = (uint8_t)(s.rpm >> 8);
+        d[16] = (uint8_t)s.tach_age_ms;
+        d[17] = (uint8_t)(s.tach_age_ms >> 8);
+        SendW2Frame(TYPE_QUERY, d, 18U);
+        break;
+    }
     case OBJ_NTC:
     {
         AppNtcSnapshot s;
@@ -353,6 +385,23 @@ static void process_a2_control(const uint8_t *data, uint8_t len)
         uint8_t r[2];
         r[0] = STATUS_OK;
         r[1] = OBJ_PD13;
+        SendW2Frame(TYPE_CONTROL, r, 2U);
+        break;
+    }
+    case OBJ_FAN:
+    {
+        if (len < 4U) { send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_FAN); return; }
+        uint8_t en = data[1];
+        if (en > 1U) { send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_FAN); return; }
+        uint16_t dty = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+        if (!AppFan_SetEnabled(en == 1U, dty))
+        {
+            send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_FAN);
+            return;
+        }
+        uint8_t r[2];
+        r[0] = STATUS_OK;
+        r[1] = OBJ_FAN;
         SendW2Frame(TYPE_CONTROL, r, 2U);
         break;
     }

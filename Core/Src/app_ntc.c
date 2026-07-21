@@ -1,6 +1,7 @@
 #include "app_ntc.h"
 #include "app_ntc_config.h"
-#include "adc.h"
+#include "app_adc_scan.h"
+#include "stm32f4xx_hal.h"
 #include <math.h>
 #include <stddef.h>
 
@@ -65,20 +66,9 @@ static bool calc_temp(int16_t *out, uint32_t r_ohm)
 
 static bool do_sample(uint16_t *adc_out)
 {
+    uint32_t ntc_count = 0U;
     if (adc_out == NULL) return false;
-    uint32_t sum = 0U;
-
-    for (uint32_t i = 0U; i < APP_NTC_SAMPLE_COUNT; i++)
-    {
-        if (HAL_ADC_Start(&hadc1) != HAL_OK) return false;
-        if (HAL_ADC_PollForConversion(&hadc1, APP_NTC_ADC_TIMEOUT_MS) != HAL_OK)
-        { HAL_ADC_Stop(&hadc1); return false; }
-        uint32_t v = HAL_ADC_GetValue(&hadc1);
-        HAL_ADC_Stop(&hadc1);
-        sum += v;
-    }
-
-    *adc_out = (uint16_t)((sum + APP_NTC_SAMPLE_COUNT / 2U) / APP_NTC_SAMPLE_COUNT);
+    if (!AppAdcScan_GetNtcAverage(adc_out, &ntc_count)) return false;
     return true;
 }
 
