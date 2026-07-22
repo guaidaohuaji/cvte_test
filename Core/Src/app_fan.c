@@ -12,6 +12,8 @@ static uint32_t boost_start_tick;
 static uint32_t last_fg_fmhz;
 static uint16_t last_rpm;
 static uint32_t last_tach_tick;
+static uint32_t last_fg_update_seq;
+static uint32_t fan_start_tick;
 static bool     init_ok;
 
 static bool apply_duty(uint16_t d)
@@ -29,6 +31,11 @@ static uint16_t calc_rpm(uint32_t fmhz)
     return (r > 65535ULL) ? 65535U : (uint16_t)r;
 }
 
+static bool is_grace_period_active(void)
+{
+    return (HAL_GetTick() - fan_start_tick) < APP_FAN_STARTUP_BOOST_MS;
+}
+
 bool AppFan_Init(void)
 {
     state       = APP_FAN_STATE_OFF;
@@ -37,6 +44,9 @@ bool AppFan_Init(void)
     applied_duty = 0U;
     last_fg_fmhz = 0U;
     last_rpm     = 0U;
+    last_tach_tick = 0U;
+    last_fg_update_seq = 0U;
+    fan_start_tick     = 0U;
     init_ok = false;
 
     if ((APP_FAN_PWM_PRESCALER > 65535U) ||
@@ -58,6 +68,82 @@ bool AppFan_Init(void)
 
     __HAL_TIM_SET_COMPARE(&htim10, TIM_CHANNEL_1, 0U);
     init_ok = true;
+    return true;
+}
+
+static void check_no_tach(uint32_t now)
+{
+    if (applied_duty == 0U) return;
+    if (is_grace_period_active()) return;
+
+    if ((now - last_tach_tick) >= APP_FAN_NO_TACH_TIMEOUT_MS)
+    {
+        state = APP_FAN_STATE_NO_TACH;
+        last_fg_fmhz = 0U;
+        last_rpm     = 0U;
+    }
+}
+
+static void handle_disable(void)
+{
+    if (!apply_duty(0U)) { state = APP_FAN_STATE_PWM_ERROR; enabled = false; return; }
+    applied_duty = 0U;
+    enabled     = false;
+    state       = APP_FAN_STATE_OFF;
+    last_fg_fmhz = 0U;
+    last_rpm     = 0U;
+    last_tach_tick = 0U;
+}
+
+static bool handle_fresh_enable(uint16_t duty)
+{
+    if (!apply_duty(APP_FAN_MAX_DUTY_X100))
+    {
+        apply_duty(0U);
+        state = APP_FAN_STATE_PWM_ERROR;
+        enabled = false;
+        return false;
+    }
+
+    AppFanFeedback_ResetMeasurement();
+
+    AppFanFeedbackSnapshot tmp;
+    if (AppFanFeedback_GetSnapshot(&tmp))
+        last_fg_update_seq = tmp.update_seq;
+    else
+        last_fg_update_seq = 0U;
+
+    applied_duty     = APP_FAN_MAX_DUTY_X100;
+    enabled          = true;
+    boost_start_tick = HAL_GetTick();
+    state            = APP_FAN_STATE_STARTUP_BOOST;
+    fan_start_tick   = HAL_GetTick();
+    last_fg_fmhz     = 0U;
+    last_rpm         = 0U;
+    last_tach_tick   = 0U;
+
+    target_duty = duty;
+    return true;
+}
+
+static bool handle_duty_update(uint16_t duty)
+{
+    target_duty = duty;
+
+    if (state == APP_FAN_STATE_STARTUP_BOOST)
+        return true;
+
+    if (!apply_duty(duty))
+    {
+        apply_duty(0U);
+        state = APP_FAN_STATE_PWM_ERROR;
+        enabled = false;
+        return false;
+    }
+    applied_duty = duty;
+    state = (duty >= APP_FAN_MAX_DUTY_X100)
+            ? APP_FAN_STATE_RUNNING
+            : APP_FAN_STATE_TACH_UNRELIABLE;
     return true;
 }
 
@@ -86,30 +172,32 @@ void AppFan_Process(void)
 
     if (!enabled) return;
 
+    if (applied_duty == 0U) return;
+
+    uint32_t now = HAL_GetTick();
     AppFanFeedbackSnapshot fs;
+
     if (AppFanFeedback_GetSnapshot(&fs) && (fs.state == 1U))
     {
-        last_fg_fmhz   = fs.freq_millihz;
-        last_rpm       = calc_rpm(fs.freq_millihz);
-        last_tach_tick = HAL_GetTick();
-
-        if (applied_duty >= APP_FAN_MAX_DUTY_X100)
+        if (fs.update_seq != last_fg_update_seq)
         {
-            uint32_t age = HAL_GetTick() - last_tach_tick;
-            state = (age < APP_FAN_NO_TACH_TIMEOUT_MS)
-                    ? APP_FAN_STATE_RUNNING
-                    : APP_FAN_STATE_NO_TACH;
+            last_fg_fmhz   = fs.freq_millihz;
+            last_rpm       = calc_rpm(fs.freq_millihz);
+            last_tach_tick = now;
+            last_fg_update_seq = fs.update_seq;
+
+            if (state == APP_FAN_STATE_NO_TACH)
+            {
+                state = (applied_duty >= APP_FAN_MAX_DUTY_X100)
+                        ? APP_FAN_STATE_RUNNING
+                        : APP_FAN_STATE_TACH_UNRELIABLE;
+            }
         }
+        check_no_tach(now);
     }
     else
     {
-        if ((applied_duty >= APP_FAN_MAX_DUTY_X100) &&
-            ((HAL_GetTick() - last_tach_tick) >= APP_FAN_NO_TACH_TIMEOUT_MS))
-        {
-            state = APP_FAN_STATE_NO_TACH;
-            last_fg_fmhz = 0U;
-            last_rpm     = 0U;
-        }
+        check_no_tach(now);
     }
 }
 
@@ -120,31 +208,39 @@ bool AppFan_SetEnabled(bool en, uint16_t duty)
     if (!en)
     {
         if (duty != 0U) return false;
+        handle_disable();
+        return true;
+    }
+
+    if (duty == 0U)
+    {
+        if (!enabled)
+        {
+            AppFanFeedback_ResetMeasurement();
+            AppFanFeedbackSnapshot tmp;
+            if (AppFanFeedback_GetSnapshot(&tmp))
+                last_fg_update_seq = tmp.update_seq;
+            else
+                last_fg_update_seq = 0U;
+        }
         if (!apply_duty(0U)) { state = APP_FAN_STATE_PWM_ERROR; enabled = false; return false; }
-        applied_duty = 0U;
-        enabled     = false;
-        state       = APP_FAN_STATE_OFF;
+        applied_duty     = 0U;
+        enabled          = true;
+        state            = APP_FAN_STATE_OFF;
+        target_duty      = 0U;
+        last_fg_fmhz     = 0U;
+        last_rpm         = 0U;
+        last_tach_tick   = 0U;
         return true;
     }
 
     if ((duty < APP_FAN_MIN_DUTY_X100) || (duty > APP_FAN_MAX_DUTY_X100))
         return false;
 
-    target_duty = duty;
+    if (!enabled)
+        return handle_fresh_enable(duty);
 
-    if (!apply_duty(APP_FAN_MAX_DUTY_X100))
-    {
-        apply_duty(0U);
-        state = APP_FAN_STATE_PWM_ERROR;
-        enabled = false;
-        return false;
-    }
-
-    applied_duty     = APP_FAN_MAX_DUTY_X100;
-    enabled          = true;
-    boost_start_tick = HAL_GetTick();
-    state            = APP_FAN_STATE_STARTUP_BOOST;
-    return true;
+    return handle_duty_update(duty);
 }
 
 bool AppFan_GetSnapshot(AppFanSnapshot *s)
@@ -159,7 +255,7 @@ bool AppFan_GetSnapshot(AppFanSnapshot *s)
     s->fg_frequency_millihz = last_fg_fmhz;
     s->rpm                 = last_rpm;
 
-    uint32_t age = (state == APP_FAN_STATE_OFF)
+    uint32_t age = (state == APP_FAN_STATE_OFF || last_tach_tick == 0U)
                    ? 65535U
                    : HAL_GetTick() - last_tach_tick;
     s->tach_age_ms = (age > 65535U) ? 65535U : (uint16_t)age;

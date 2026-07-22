@@ -83,6 +83,11 @@ bool AppAdcScan_GetCh0Block(const uint16_t **data, uint32_t *count, uint32_t *se
     return true;
 }
 
+uint32_t AppAdcScan_GetOverrunCount(void)
+{
+    return overrun_count;
+}
+
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance != ADC1) return;

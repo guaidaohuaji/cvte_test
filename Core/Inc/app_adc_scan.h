@@ -10,5 +10,6 @@ bool AppAdcScan_Init(void);
 void AppAdcScan_Process(void);
 bool AppAdcScan_GetNtcAverage(uint16_t *avg, uint32_t *samples);
 bool AppAdcScan_GetCh0Block(const uint16_t **data, uint32_t *count, uint32_t *seq);
+uint32_t AppAdcScan_GetOverrunCount(void);
 
 #endif
