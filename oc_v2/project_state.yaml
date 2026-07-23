@@ -1,0 +1,236 @@
+project:
+  name: stm32f407_full_application_with_onewire_and_damper
+  handoff_version: v3
+  handoff_date: 2026-07-23
+  expected_root: 'C:\Users\user\Desktop\document\project\cvte_test-step11-led-arbitration\cvte_test-step11-led-arbitration'
+  authoritative_source: current_local_source
+  reference_snapshot: cvte_test-step11-led-arbitration
+  reference_zip_sha256: '65e30ab405b10481fa6030d2bebcdcac924979193547c477b8a4b96d64c675ae'
+  development_steps_completed: [1, 2, 3, 3.1, 4, 5, 5.1]
+
+platform:
+  mcu: STM32F407VET6
+  framework: STM32_HAL
+  architecture: bare_metal_main_loop
+  clock_hz: 168000000
+  toolchain: arm-none-eabi-gcc
+  build_entry: build.ps1
+  debugger: J-Link_SWD
+
+interfaces:
+  usart1:
+    purpose: W2_host_protocol
+    pins: [PA9_TX, PA10_RX]
+    baud: 9600
+    format: 8N1
+  usart6:
+    purpose: board_to_board_onewire
+    pins: [PC6_TX, PC7_RX]
+    baud: 38400
+    format: 8N1
+  pwm_output:
+    object: 0x01
+    timer: TIM4_CH1
+    pin: PB6
+    range_hz: [1, 100000]
+    duty_units: x100
+    boot: {enabled: true, frequency_hz: 1000, duty_x100: 5000}
+  led:
+    object: 0x02
+    pin: PE8
+    active_low: true
+  pwm_input:
+    object: 0x03
+    timer: TIM1_CH1
+    pin: PE9
+    counter_hz: 1000000
+    range_hz: [1, 5000]
+    timeout_ms: 2500
+  digital_output:
+    object: 0x04
+    pin: PD13
+    boot_level: high
+  ntc:
+    object: 0x05
+    adc: ADC1_IN9
+    pin: PB1
+    interval_ms: 250
+    valid_temp_centi_c: [0, 6000]
+    b_value_k: 3839
+  fan:
+    object: 0x06
+    pwm_timer: TIM10_CH1
+    pwm_pin: PB8
+    pwm_frequency_hz: 10000
+    duty_nonzero_range_x100: [1000, 10000]
+    startup_boost_ms: 2000
+    no_tach_timeout_ms: 500
+  fan_feedback:
+    adc: ADC1_IN0
+    pin: PA0
+    sample_rate_hz: 10000
+    accepted_frequency_hz: [10, 120]
+    rpm_factor: 30
+  onewire:
+    object: 0x08
+  damper:
+    object: 0x07
+    driver: TB6612
+    motor: FBZA-1750-6 (2-phase bipolar stepper)
+    pins:
+      - {pin: PB3, signal: AIN1, function: GPIO_output}
+      - {pin: PB4, signal: AIN2, function: GPIO_output}
+      - {pin: PB5, signal: BIN1, function: GPIO_output}
+      - {pin: PC14, signal: BIN2, function: GPIO_output}
+      - {pin: PC15, signal: STBY, function: GPIO_output}
+    tb6612_power:
+      vm: 12V
+      vcc: 3.3V
+      pwma: 3.3V_fixed
+      pwmb: 3.3V_fixed
+    coil_wiring:
+      ao1: {wire: 6, color: blue, phase: A_plus}
+      ao2: {wire: 1, color: white, phase: A_minus}
+      bo1: {wire: 5, color: red, phase: B_plus}
+      bo2: {wire: 2, color: yellow, phase: B_minus}
+    step_pps: 300
+    full_travel_steps: 1700
+    post_move_hold_ms: 100
+    phase_table:
+      - {phase: 0, b_bsrr: 0x00100028, c_bsrr: 0x40000000, pb3: 1, pb4: 0, pb5: 1, pc14: 0}
+      - {phase: 1, b_bsrr: 0x00080030, c_bsrr: 0x40000000, pb3: 0, pb4: 1, pb5: 1, pc14: 0}
+      - {phase: 2, b_bsrr: 0x00280010, c_bsrr: 0x00004000, pb3: 0, pb4: 1, pb5: 0, pc14: 1}
+      - {phase: 3, b_bsrr: 0x00300008, c_bsrr: 0x00004000, pb3: 1, pb4: 0, pb5: 0, pc14: 1}
+    note: >
+      PC14/PC15 已确认未焊 LSE 晶振.
+      PB3/PB4 改作 GPIO 后失去 SWO/JTAG 功能, SWD (PA13/PA14) 正常.
+      正向 (0→1→2→3) 实物确认为关闭. 反向为打开.
+      逻辑坐标: 0步=全开, 1700步=全关.
+      APP_DAMPER_FORWARD_IS_OPEN=0 仅作说明, 不参与方向计算.
+      100 PPS 实物验证通过. 当前构建为 300 PPS (待实物验证).
+
+adc_shared_scan:
+  timer_trigger: TIM2_TRGO
+  trigger_rate_hz: 10000
+  adc: ADC1
+  sequence:
+    - {rank: 1, channel: ADC1_IN0, pin: PA0, consumer: fan_feedback}
+    - {rank: 2, channel: ADC1_IN9, pin: PB1, consumer: ntc}
+  dma: DMA2_Stream0
+  mode: circular
+  buffer_halfwords: 1024
+
+timer_resources:
+  existing:
+    - {timer: TIM1, use: pwm_input_capture}
+    - {timer: TIM2, use: adc_trigger}
+    - {timer: TIM4, use: generic_pwm_output}
+    - {timer: TIM10, use: fan_pwm}
+  added:
+    - {timer: TIM6, use: damper_step_timing, psc: 279, arr: 999, freq_hz: 300, nvic_priority: 14}
+
+interrupt_priorities:
+  USART1: 10
+  USART6: 11
+  TIM1_CC: 12
+  TIM1_UP_TIM10: 12
+  DMA2_Stream0: 13
+  TIM6_DAC: 14
+  SysTick: 15
+
+roles:
+  master: {compile_value: 1, address: 0x01, output_dir: build_master}
+  slave: {compile_value: 2, address: 0x02, output_dir: build_slave}
+
+role_isolation:
+  damper_enabled_macro: APP_DAMPER_ENABLED
+  damper_enabled_master: 1
+  damper_enabled_slave: 0
+  master:
+    - initializes_TIM6
+    - configures_damper_GPIO
+    - object_0x07_A2_enabled
+    - object_0x07_A1_returns_actual_state
+  slave:
+    - does_not_initialize_TIM6
+    - does_not_configure_damper_GPIO
+    - object_0x07_A2_returns_READ_ONLY
+    - object_0x07_A1_returns_UNAVAILABLE_state
+
+verified:
+  onewire_write_0x0008_0x1234: hardware
+  onewire_read_0x0008_0x1234: hardware
+  onewire_automatic_rehandshake_after_stale: hardware
+  onewire_host_tests: passed
+  led_host_test: passed
+
+source_present_but_hardware_evidence_not_archived:
+  - generic_pwm_output
+  - pwm_input_frequency_and_duty
+  - fan_pwm_and_startup_boost
+  - fan_feedback_and_rpm
+  - ntc_accuracy
+  - pd13_external_logic
+  - damper_all    # 风门全套功能: 100PPS 步进, 1850步90°, 方向, 释放后漂移, 电流, VM尖峰, 线圈温升
+
+known_static_risks:
+  - master_slave_tx_recovery_gap
+  - pwm_input_duty_may_be_complement
+  - adc_live_dma_buffer_coherency
+  - ntc_config_sample_count_not_used
+  - pwm_input_unused_status_enums
+  - fan_rpm_factor_implies_two_pulses_per_rev
+  - old_w2_objects_accept_extra_trailing_data
+  - pd13_comment_says_pd15
+  - missing_unit_tests_for_existing_application_modules
+  - damper_hardfault_no_standby_shutdown    # HardFault 无风门关闭
+  - damper_1850_steps_calibrated_to_1700   # 实测约 1700 步全开→全关, 宏已更新
+  - damper_cubemx_overwrite_risk            # TIM6 配置可能被覆盖
+  - damper_stby_external_pulldown_unverified # STBY 外部10kΩ下拉需确认
+
+regression_must_preserve:
+  - w2_objects_0x01_to_0x06
+  - w2_object_0x08_layout
+  - w2_object_0x07_layout
+  - adc_shared_between_fan_feedback_and_ntc
+  - pwm_output_on_pb6
+  - fan_pwm_on_pb8
+  - pwm_input_on_pe9
+  - led_active_low_manual_override
+  - onewire_no_automatic_read_write
+  - onewire_stale_does_not_overwrite_last_result
+  - onewire_3ms_guard
+
+build_results:
+  master:
+    build_status: PASS
+    text: 48428
+    data: 384
+    bss: 6088
+    total: 54900
+    errors: 0
+    new_warnings: 0
+    hex_path: build_master/test_master.hex
+  slave:
+    build_status: PASS
+    text: 44132
+    data: 384
+    bss: 6584
+    total: 51100
+    errors: 0
+    new_warnings: 0
+    hex_path: build_slave/test_slave.hex
+
+fault_handlers:
+  error_handler: "先 __disable_irq(), 再 AppDamper_EmergencyShutdown(), 再 while(1)"
+  hardfault: "已接入 EmergencyShutdown (best-effort)"
+  memmanage: "已接入 EmergencyShutdown (best-effort)"
+  busfault: "已接入 EmergencyShutdown (best-effort)"
+  usagefault: "已接入 EmergencyShutdown (best-effort)"
+  nmi: "已接入 EmergencyShutdown (best-effort)"
+  note: >
+    致命异常中的 EmergencyShutdown 属于 best-effort.
+    若异常由栈损坏/总线不可访问/代码取指故障引起, 不保证一定能完整执行.
+    Cortex-M4 进入异常时不会自动设置 PRIMASK.
+    __disable_irq() 由软件显式设置 PRIMASK 阻止普通可屏蔽中断介入.
+    NMI 和 HardFault 不受 PRIMASK 屏蔽.

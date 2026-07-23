@@ -36,6 +36,7 @@
 #include "app_onewire_uart.h"
 #include "app_onewire.h"
 #include "app_led.h"
+#include "app_damper.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -106,6 +107,9 @@ int main(void)
   MX_TIM10_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+#if APP_DAMPER_ENABLED
+  MX_TIM6_Init();
+#endif
   AppUart_Init();
   AppOneWireUart_Init();
   AppOneWire_Init();
@@ -121,6 +125,7 @@ int main(void)
   (void)AppNtc_Init();
   (void)AppFan_Init();
   (void)AppAdcScan_Init();
+  AppDamper_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -139,6 +144,7 @@ int main(void)
     AppFan_Process();
     AppAdcScan_Process();
     AppFanFeedback_Process();
+    AppDamper_Process();
   }
   /* USER CODE END 3 */
 }
@@ -229,7 +235,14 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  AppPwmInput_UP_Callback(htim);
+  if (htim->Instance == TIM1)
+  {
+    AppPwmInput_UP_Callback(htim);
+  }
+  else if (htim->Instance == TIM6)
+  {
+    AppDamper_TimerCallback();
+  }
 }
 
 /* USER CODE END 4 */
@@ -241,8 +254,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
+  AppDamper_EmergencyShutdown();
   while (1)
   {
   }

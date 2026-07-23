@@ -1,0 +1,55 @@
+SOURCE EXTRACTION REPORT
+========================
+
+Source basis:
+cvte_test-step11-led-arbitration.zip
+SHA256:
+65e30ab405b10481fa6030d2bebcdcac924979193547c477b8a4b96d64c675ae
+
+Read-only files inspected:
+Core/Src/main.c
+Core/Src/app_uart.c
+Core/Src/app_pwm.c
+Core/Src/app_pwm_input.c
+Core/Src/app_adc_scan.c
+Core/Src/app_ntc.c
+Core/Src/app_fan.c
+Core/Src/app_fan_feedback_adc.c
+Core/Src/tim.c
+Core/Src/adc.c
+Core/Src/dma.c
+Core/Src/gpio.c
+Core/Src/stm32f4xx_it.c
+Core/Inc/app_pwm.h
+Core/Inc/app_pwm_input.h
+Core/Inc/app_adc_scan.h
+Core/Inc/app_ntc.h
+Core/Inc/app_ntc_config.h
+Core/Inc/app_fan.h
+Core/Inc/app_fan_config.h
+Core/Inc/app_fan_feedback_adc.h
+Core/Inc/main.h
+test.ioc
+build.ps1
+
+Confirmed source features:
+- W2 objects 0x01,0x02,0x03,0x04,0x05,0x06,0x08
+- TIM4/PB6 generic PWM
+- TIM1/PE9 PWM input
+- TIM10/PB8 fan PWM
+- ADC1_IN0/PA0 fan feedback
+- ADC1_IN9/PB1 NTC
+- TIM2 10kHz ADC trigger
+- DMA2 Stream0 circular shared buffer
+- PE8 active-low LED
+- PD13 digital output
+
+Static findings requiring validation:
+- PWM input duty may be complement.
+- ADC live DMA buffer coherence risk.
+- NTC sample-count config is not used as a 32-sample window.
+- Fan RPM factor implies 2 pulses/rev.
+- Existing application modules lack dedicated host tests.
+- app_uart PD15 comment conflicts with PD13 implementation.
+
+No source code was modified during extraction.

@@ -6,6 +6,7 @@
 #include "app_onewire.h"
 #include "app_onewire_config.h"
 #include "app_led.h"
+#include "app_damper.h"
 #include "usart.h"
 #include <stdbool.h>
 
@@ -27,6 +28,13 @@
 #define OBJ_NTC      0x05U
 #define OBJ_FAN      0x06U
 #define OBJ_ONEWIRE  0x08U
+#define OBJ_DAMPER   0x07U
+
+#define DAMPER_A2_MOVE_ABSOLUTE        0x01U
+#define DAMPER_A2_MOVE_RELATIVE        0x02U
+#define DAMPER_A2_STOP                 0x03U
+#define DAMPER_A2_RELEASE              0x04U
+#define DAMPER_A2_SET_CURRENT_POSITION 0x05U
 
 #define STATUS_OK                    0x00U
 #define STATUS_LENGTH_ERROR          0x01U
@@ -196,6 +204,143 @@ static void process_onewire_control(const uint8_t *data, uint8_t len)
     send_error(TYPE_CONTROL, status, OBJ_ONEWIRE);
 }
 
+static void write_u16_le(uint8_t *dst, uint16_t value)
+{
+    dst[0] = (uint8_t)value;
+    dst[1] = (uint8_t)(value >> 8U);
+}
+
+static void write_u32_le(uint8_t *dst, uint32_t value)
+{
+    dst[0] = (uint8_t)value;
+    dst[1] = (uint8_t)(value >> 8U);
+    dst[2] = (uint8_t)(value >> 16U);
+    dst[3] = (uint8_t)(value >> 24U);
+}
+
+static void write_i32_le(uint8_t *dst, int32_t value)
+{
+    write_u32_le(dst, (uint32_t)value);
+}
+
+static void process_damper_query(void)
+{
+    DamperSnapshot snapshot;
+    uint8_t d[23];
+
+    AppDamper_GetSnapshot(&snapshot);
+
+    d[0] = STATUS_OK;
+    d[1] = OBJ_DAMPER;
+    d[2] = snapshot.damper_state;
+    d[3] = snapshot.flags;
+    write_i32_le(&d[4],  snapshot.current_steps);
+    write_i32_le(&d[8],  snapshot.target_steps);
+    write_u32_le(&d[12], snapshot.remaining_steps);
+    write_u16_le(&d[16], snapshot.full_travel_steps);
+    write_u16_le(&d[18], snapshot.configured_pps);
+    d[20] = snapshot.last_command;
+    d[21] = snapshot.last_result;
+    d[22] = snapshot.fault_flags;
+
+    (void)SendW2Frame(TYPE_QUERY, d, (uint8_t)sizeof(d));
+}
+
+static int32_t damper_read_int32le(const uint8_t *data, uint8_t offset)
+{
+    uint32_t raw = (uint32_t)data[offset] |
+                   ((uint32_t)data[offset + 1U] << 8U) |
+                   ((uint32_t)data[offset + 2U] << 16U) |
+                   ((uint32_t)data[offset + 3U] << 24U);
+    return (int32_t)raw;
+}
+
+static uint8_t damper_status_to_w2(DamperStatus damper_status)
+{
+    switch (damper_status)
+    {
+    case DAMPER_STATUS_OK:            return STATUS_OK;
+    case DAMPER_STATUS_BUSY:          return STATUS_BUSY;
+    case DAMPER_STATUS_PARAM_RANGE:   return STATUS_PARAM_RANGE;
+    case DAMPER_STATUS_NO_VALID_DATA: return STATUS_NO_VALID_DATA;
+    case DAMPER_STATUS_READ_ONLY:     return STATUS_READ_ONLY;
+    case DAMPER_STATUS_HW_ERROR:
+    default:                          return STATUS_HW_ERROR;
+    }
+}
+
+static void process_damper_control(const uint8_t *data, uint8_t len)
+{
+    uint8_t  sub_cmd;
+    uint8_t  damper_status;
+    int32_t  value;
+
+    if (len < 2U)
+    {
+        send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+        return;
+    }
+
+    sub_cmd = data[1];
+
+    switch (sub_cmd)
+    {
+    case DAMPER_A2_MOVE_ABSOLUTE:
+        if (len != 6U)
+        {
+            send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            return;
+        }
+        value = damper_read_int32le(data, 2U);
+        damper_status = AppDamper_MoveAbsolute(value);
+        break;
+
+    case DAMPER_A2_MOVE_RELATIVE:
+        if (len != 6U)
+        {
+            send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            return;
+        }
+        value = damper_read_int32le(data, 2U);
+        damper_status = AppDamper_MoveRelative(value);
+        break;
+
+    case DAMPER_A2_STOP:
+        if (len != 2U)
+        {
+            send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            return;
+        }
+        damper_status = AppDamper_Stop();
+        break;
+
+    case DAMPER_A2_RELEASE:
+        if (len != 2U)
+        {
+            send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            return;
+        }
+        damper_status = AppDamper_Release();
+        break;
+
+    case DAMPER_A2_SET_CURRENT_POSITION:
+        if (len != 6U)
+        {
+            send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            return;
+        }
+        value = damper_read_int32le(data, 2U);
+        damper_status = AppDamper_SetCurrentPosition(value);
+        break;
+
+    default:
+        send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_DAMPER);
+        return;
+    }
+
+    send_error(TYPE_CONTROL, damper_status_to_w2(damper_status), OBJ_DAMPER);
+}
+
 /* PD15 drives an inverting NPN collector output:
    PD15 HIGH -> transistor ON  -> collector output LOW.
    PD15 LOW  -> transistor OFF -> collector output HIGH
@@ -344,6 +489,14 @@ static void process_a1_query(const uint8_t *data, uint8_t len)
     case OBJ_ONEWIRE:
         process_onewire_query();
         break;
+    case OBJ_DAMPER:
+        if (len != 1U)
+        {
+            send_error(TYPE_QUERY, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            break;
+        }
+        process_damper_query();
+        break;
     default:
         send_error(TYPE_QUERY, STATUS_UNSUPPORTED_OBJECT, obj);
         break;
@@ -478,6 +631,9 @@ static void process_a2_control(const uint8_t *data, uint8_t len)
         break;
     case OBJ_ONEWIRE:
         process_onewire_control(data, len);
+        break;
+    case OBJ_DAMPER:
+        process_damper_control(data, len);
         break;
     default:
         send_error(TYPE_CONTROL, STATUS_UNSUPPORTED_OBJECT, obj);

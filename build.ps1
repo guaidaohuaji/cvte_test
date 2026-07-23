@@ -68,6 +68,7 @@ $C_FILES = @(
     "Core/Src/app_fan.c",
     "Core/Src/app_adc_scan.c",
     "Core/Src/app_fan_feedback_adc.c",
+    "Core/Src/app_damper.c",
     "Core/Src/stm32f4xx_it.c",
     "Core/Src/tim.c",
     "Core/Src/stm32f4xx_hal_msp.c",

@@ -1,0 +1,186 @@
+USART1: 9600 8N1, HEX, no CR/LF
+
+QUERY
+PWM OUT : 7E A1 03 01 A5
+LED     : 7E A1 03 02 A6
+PWM IN  : 7E A1 03 03 A7
+PD13    : 7E A1 03 04 A8
+NTC     : 7E A1 03 05 A9
+FAN     : 7E A1 03 06 AA
+DAMPER  : 7E A1 03 07 AB
+ONEWIRE : 7E A1 03 08 AC
+
+============================================================
+DAMPER (0x07) — 当前构建 300 PPS, 1700步 (APP_DAMPER_STEP_PPS=300)
+============================================================
+
+A1 响应固定 23 字节 DATA, LEN=0x19.
+
+A1 IDLE_RELEASED (300 PPS, position_valid, 位置0, full_travel=1700):
+7E A1 19 00 07 04 19 00 00 00 00 00 00 00 00 00 00 00 00 A4 06 2C 01 00 00 00 B5
+
+A1 MOVING_FORWARD (300 PPS, 位置248→500, 剩余252, 正向=关闭, IN_PROGRESS, full_travel=1700):
+7E A1 19 00 07 02 17 F8 00 00 00 F4 01 00 00 FC 00 00 00 A4 06 2C 01 01 05 00 A0
+
+A1 Slave (UNAVAILABLE, full_travel=1700, pps=300):
+7E A1 19 00 07 FE 00 00 00 00 00 00 00 00 00 00 00 00 A4 06 2C 01 00 00 00 00
+
+--- 历史版本 (实物验证通过, 不适用于当前 300 PPS 构建) ---
+
+100 PPS, 1700步 IDLE_RELEASED:
+# 7E A1 19 00 07 04 19 00 00 00 00 00 00 00 00 00 00 00 00 A4 06 64 00 00 00 00 EC
+
+100 PPS, 1700步 MOVING_FORWARD:
+# 7E A1 19 00 07 02 17 F8 00 00 00 F4 01 00 00 FC 00 00 00 A4 06 64 00 01 05 00 D7
+
+A2 请求 — 所有长度严格检查 (len == expected)
+
+MOVE_ABSOLUTE 500:
+7E A2 08 07 01 F4 01 00 00 A7
+
+MOVE_ABSOLUTE 1700 (全关):
+7E A2 08 07 01 A4 06 00 00 5C
+
+MOVE_RELATIVE +20:
+7E A2 08 07 02 14 00 00 00 C7
+
+MOVE_RELATIVE -20:
+7E A2 08 07 02 EC FF FF FF 9C
+
+STOP:
+7E A2 04 07 03 B0
+
+RELEASE:
+7E A2 04 07 04 B1
+
+SET_CURRENT_POSITION 500:
+7E A2 08 07 05 F4 01 00 00 AB
+
+SET_CURRENT_POSITION 1700:
+7E A2 08 07 05 A4 06 00 00 60
+
+A2 响应:
+
+SUCCESS (命令已接受/同步成功):
+7E A2 04 00 07 AD
+
+BUSY (运动中收到 MOVE):
+7E A2 04 09 07 B6
+
+PARAM_RANGE:
+7E A2 04 05 07 B2
+
+READ_ONLY (Slave A2):
+7E A2 04 07 07 B4
+
+NO_VALID_DATA (position_valid=false 绝对移动):
+7E A2 04 08 07 B5
+
+HW_ERROR (FAULT 状态收到 MOVE):
+7E A2 04 0A 07 B7
+
+LENGTH_ERROR:
+7E A2 04 01 07 AE
+
+A1 帧布局 (23 字节):
+[0]  status          (0x00=OK)
+[1]  object_id       (0x07)
+[2]  damper_state    (0x00=UNINIT, 0x01=POS_UNKNOWN, 0x02=FWD, 0x03=REV, 0x04=IDLE_REL, 0x05=POST_HOLD, 0x06=STOPPED, 0x07=FAULT, 0xFE=UNAVAIL)
+[3]  flags           (bit0=pos_valid, bit1=moving, bit2=dir, bit3=released, bit4=estimated)
+[4..7]   current_steps     int32 LE
+[8..11]  target_steps      int32 LE
+[12..15] remaining_steps   uint32 LE
+[16..17] full_travel       uint16 LE
+[18..19] configured_pps    uint16 LE
+[20] last_command    (0x00=NONE, 0x01=ABS, 0x02=REL)
+[21] last_result     (0x00=SUCCESS, 0x01=ABRT_STOP, 0x02=ABRT_REL, 0x03=ABRT_EMERG, 0x04=HW_ERR, 0x05=IN_PROG)
+[22] fault_flags     (bit0=emergency, bit1=internal_range)
+
+A2 子命令:
+0x01 MOVE_ABSOLUTE      DATA len=6: 07 01 + target_int32_LE
+0x02 MOVE_RELATIVE      DATA len=6: 07 02 + delta_int32_LE
+0x03 STOP               DATA len=2: 07 03
+0x04 RELEASE            DATA len=2: 07 04
+0x05 SET_CUR_POS        DATA len=6: 07 05 + pos_int32_LE
+
+frame_buf 索引:
+  线上: 7E | TYPE | LEN | DATA[0]...DATA[n-1] | CSUM
+  buf:  —  | [0]  | [1] | [2]...[1+n]         | [2+n]
+  data[0] = 对象 ID
+  data[1] = 子命令 (A2)
+
+验证方式:
+  A1/A2 响应帧: 由 SendW2Frame/send_error 构帧路径核对
+  A1/A2 请求帧: 独立十六进制校验计算验证
+
+============================================================
+PWM OUT
+ENABLE 1kHz 50%:
+7E A2 0A 01 01 E8 03 00 00 88 13 34
+SUCCESS:
+7E A2 04 00 01 A7
+
+DISABLE:
+7E A2 0A 01 00 00 00 00 00 00 00 AD
+
+LED
+OFF : 7E A2 04 02 00 A8
+ON  : 7E A2 04 02 01 A9
+AUTO: 7E A2 04 02 02 AA
+SUCCESS: 7E A2 04 00 02 A8
+
+PD13
+LOW : 7E A2 04 04 00 AA
+HIGH: 7E A2 04 04 01 AB
+SUCCESS: 7E A2 04 00 04 AA
+
+FAN
+ENABLE 100%:
+7E A2 06 06 01 10 27 E6
+ENABLE 50%:
+7E A2 06 06 01 88 13 4A
+DISABLE:
+7E A2 06 06 00 00 00 AE
+SUCCESS:
+7E A2 04 00 06 AC
+
+ONEWIRE
+FORCE REHANDSHAKE:
+7E A2 08 08 01 00 00 00 00 B3
+
+WRITE 0x0008=0x1234:
+7E A2 08 08 03 08 00 34 12 03
+
+READ 0x0008:
+7E A2 08 08 06 08 00 00 00 C0
+
+SUBMIT SUCCESS:
+7E A2 04 00 08 AE
+
+KNOWN WRITE SNAPSHOT:
+7E A1 12 00 08 01 03 00 00 03 00 08 00 34 12 00 00 00 00 10
+
+KNOWN READ SNAPSHOT:
+7E A1 12 00 08 01 03 00 00 06 00 08 00 34 12 00 00 00 00 13
+
+USART6: 38400 8N1
+
+HS1 REQUEST:
+AA 01 02 04 01 02 03 04 A9
+HS1 RESPONSE:
+AA 02 01 04 04 03 02 01 A9
+
+HS2 REQUEST:
+AA 01 02 04 04 03 02 01 A9
+HS2 RESPONSE:
+AA 02 01 04 01 02 03 04 A9
+
+WRITE REQUEST:
+AA 01 02 05 03 00 08 12 34 81
+WRITE RESPONSE:
+AA 02 01 05 03 00 08 12 34 81
+
+READ REQUEST:
+AA 01 02 05 06 00 08 00 00 A2
+READ RESPONSE:
+AA 02 01 05 06 00 08 12 34 84

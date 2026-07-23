@@ -1,0 +1,33 @@
+Step 12 host-side verification log
+==================================
+
+Compiler flags:
+  -std=c11 -Wall -Wextra -Werror -pedantic -O0 -g
+
+Results:
+  app_onewire_protocol tests passed
+  app_onewire_uart tests passed
+  app_onewire_slave tests passed
+  app_onewire_master tests passed
+  app_onewire role dispatch tests passed (master)
+  app_onewire role dispatch tests passed (slave)
+  app_led arbitration tests passed
+  app_uart one-wire object tests passed (master)
+  app_uart one-wire object tests passed (slave)
+  end-to-end master/slave integration simulation passed
+
+The end-to-end simulation used the real app_onewire_master.c,
+app_onewire_slave.c and app_onewire_protocol.c with two isolated fake UART
+endpoints and millisecond timing. It verified:
+  - boot two-step handshake
+  - write 0x0008 = 0x1234
+  - read 0x0008 returns 0x1234
+  - master 450 ms stale transition
+  - slave 500 ms communication-fault transition
+  - re-handshake followed by one pending read
+
+Not performed:
+  - arm-none-eabi-gcc target compilation
+  - STM32 final link
+  - ELF/HEX/BIN generation
+  - hardware download or signal validation

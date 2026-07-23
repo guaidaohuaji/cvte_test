@@ -1,0 +1,26 @@
+{
+  "handoff_version": "v2-short-path",
+  "handoff_date": "2026-07-23",
+  "purpose": "Short-path full-project OpenCode handoff",
+  "files": [
+    "00_READ_ME_FIRST.md",
+    "01_PROJECT_OVERVIEW.md",
+    "02_HARDWARE_WIRING.md",
+    "03_SOFTWARE_ARCHITECTURE.md",
+    "04_PROTOCOL_AND_COMMANDS.md",
+    "05_CURRENT_STATUS_AND_EVIDENCE.md",
+    "06_BUILD_FLASH_AND_TEST.md",
+    "07_KNOWN_RISKS_AND_BACKLOG.md",
+    "08_OPENCODE_WORKFLOW.md",
+    "09_SOURCE_INDEX.md",
+    "10_EXISTING_APPLICATION_FEATURES.md",
+    "11_EXISTING_FEATURE_TEST_COMMANDS.md",
+    "12_V2_SOURCE_EXTRACTION_NOTES.md",
+    "UPGRADE_FROM_V1.md",
+    "project_state.yaml",
+    "ref_audit.txt",
+    "ref_src.txt",
+    "ref_tests.txt",
+    "serial_test_vectors.txt"
+  ]
+}
