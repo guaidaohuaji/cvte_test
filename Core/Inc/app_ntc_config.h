@@ -15,7 +15,7 @@
 #define APP_NTC_REFERENCE_TEMP_MK        278150U
 #define APP_NTC_B_VALUE_K                3839U
 
-#define APP_NTC_MIN_TEMP_CENTI_C         0
+#define APP_NTC_MIN_TEMP_CENTI_C        -2500
 #define APP_NTC_MAX_TEMP_CENTI_C         6000
 
 #define APP_NTC_SAMPLE_INTERVAL_MS       250U

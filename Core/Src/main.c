@@ -37,6 +37,7 @@
 #include "app_onewire.h"
 #include "app_led.h"
 #include "app_damper.h"
+#include "app_auto_control.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -126,6 +127,7 @@ int main(void)
   (void)AppFan_Init();
   (void)AppAdcScan_Init();
   AppDamper_Init();
+  AppAutoControl_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -145,6 +147,7 @@ int main(void)
     AppAdcScan_Process();
     AppFanFeedback_Process();
     AppDamper_Process();
+    AppAutoControl_Process();
   }
   /* USER CODE END 3 */
 }

@@ -7,6 +7,7 @@
 #include "app_onewire_config.h"
 #include "app_led.h"
 #include "app_damper.h"
+#include "app_auto_control.h"
 #include "usart.h"
 #include <stdbool.h>
 
@@ -29,6 +30,7 @@
 #define OBJ_FAN      0x06U
 #define OBJ_ONEWIRE  0x08U
 #define OBJ_DAMPER   0x07U
+#define OBJ_AUTO_CONTROL 0x09U
 
 #define DAMPER_A2_MOVE_ABSOLUTE        0x01U
 #define DAMPER_A2_MOVE_RELATIVE        0x02U
@@ -47,6 +49,7 @@
 #define STATUS_NO_VALID_DATA         0x08U
 #define STATUS_BUSY                  0x09U
 #define STATUS_HW_ERROR              0x0AU
+#define STATUS_MODE_LOCKED            0x0BU
 
 typedef enum {
     PARSER_WAIT_HEADER = 0,
@@ -341,6 +344,107 @@ static void process_damper_control(const uint8_t *data, uint8_t len)
     send_error(TYPE_CONTROL, damper_status_to_w2(damper_status), OBJ_DAMPER);
 }
 
+static bool manual_control_is_allowed(void)
+{
+    return (AppAutoControl_GetMode() == APP_AUTO_MODE_MANUAL);
+}
+
+static void process_auto_control_query(void)
+{
+    AppAutoControlSnapshot snap;
+    uint8_t d[28];
+
+    AppAutoControl_GetSnapshot(&snap);
+
+    d[0] = STATUS_OK;
+    d[1] = OBJ_AUTO_CONTROL;
+    d[2] = snap.mode;
+    d[3] = snap.state;
+    {
+        uint8_t f = 0x00U;
+        if (snap.flags & 0x01U) f |= 0x01U;
+        if (snap.flags & 0x08U) f |= 0x02U;
+        if (snap.flags & 0x10U) f |= 0x04U;
+        if (snap.fan_tach_valid) f |= 0x08U;
+        if (snap.flags & 0x80U) f |= 0x10U;
+        if (snap.damper_position_valid) f |= 0x20U;
+        if (snap.damper_control_state == APP_AUTO_DAMPER_CTRL_FAULT) f |= 0x40U;
+        if (snap.damper_auto_owned) f |= 0x80U;
+        d[4] = f;
+    }
+    d[5] = snap.fan_control_state;
+    d[6] = snap.damper_control_state;
+    d[7] = snap.ntc_range_status;
+    {
+        uint16_t u = (uint16_t)snap.control_temp_centi_c;
+        d[8]  = (uint8_t)(u & 0xFFU);
+        d[9]  = (uint8_t)(u >> 8U);
+    }
+    d[10] = (uint8_t)snap.target_fan_rpm;
+    d[11] = (uint8_t)(snap.target_fan_rpm >> 8U);
+    d[12] = (uint8_t)snap.actual_fan_rpm;
+    d[13] = (uint8_t)(snap.actual_fan_rpm >> 8U);
+    d[14] = (uint8_t)snap.applied_fan_duty_x100;
+    d[15] = (uint8_t)(snap.applied_fan_duty_x100 >> 8U);
+    {
+        uint16_t u = (uint16_t)snap.target_damper_steps;
+        d[16] = (uint8_t)(u & 0xFFU);
+        d[17] = (uint8_t)(u >> 8U);
+    }
+    {
+        uint16_t u = (uint16_t)snap.actual_damper_steps;
+        d[18] = (uint8_t)(u & 0xFFU);
+        d[19] = (uint8_t)(u >> 8U);
+    }
+    {
+        uint16_t u = (uint16_t)snap.fan_error_rpm;
+        d[20] = (uint8_t)(u & 0xFFU);
+        d[21] = (uint8_t)(u >> 8U);
+    }
+    {
+        uint16_t u = (uint16_t)snap.damper_error_steps;
+        d[22] = (uint8_t)(u & 0xFFU);
+        d[23] = (uint8_t)(u >> 8U);
+    }
+    d[24] = (uint8_t)snap.update_seq;
+    d[25] = (uint8_t)(snap.update_seq >> 8U);
+    d[26] = (uint8_t)(snap.update_seq >> 16U);
+    d[27] = (uint8_t)(snap.update_seq >> 24U);
+
+    (void)SendW2Frame(TYPE_QUERY, d, (uint8_t)sizeof(d));
+}
+
+static void process_auto_control_control(const uint8_t *data, uint8_t len)
+{
+    uint8_t new_mode;
+    uint8_t result;
+
+    if (len != 2U)
+    {
+        send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_AUTO_CONTROL);
+        return;
+    }
+
+    new_mode = data[1];
+
+    if (new_mode != APP_AUTO_MODE_MANUAL && new_mode != APP_AUTO_MODE_AUTO)
+    {
+        send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_AUTO_CONTROL);
+        return;
+    }
+
+    result = AppAutoControl_SetMode(new_mode);
+
+    if (result == APP_AUTO_SET_MODE_OK)
+        send_error(TYPE_CONTROL, STATUS_OK, OBJ_AUTO_CONTROL);
+    else if (result == APP_AUTO_SET_MODE_INVALID_PARAM)
+        send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_AUTO_CONTROL);
+    else if (result == APP_AUTO_SET_MODE_UNAVAILABLE)
+        send_error(TYPE_CONTROL, STATUS_READ_ONLY, OBJ_AUTO_CONTROL);
+    else
+        send_error(TYPE_CONTROL, STATUS_HW_ERROR, OBJ_AUTO_CONTROL);
+}
+
 /* PD15 drives an inverting NPN collector output:
    PD15 HIGH -> transistor ON  -> collector output LOW.
    PD15 LOW  -> transistor OFF -> collector output HIGH
@@ -480,7 +584,7 @@ static void process_a1_query(const uint8_t *data, uint8_t len)
         d[9]  = (uint8_t)(s.resistance_ohm >> 16);
         d[10] = (uint8_t)(s.resistance_ohm >> 24);
         d[11] = (uint8_t)s.temp_centi_c;
-        d[12] = (uint8_t)(s.temp_centi_c >> 8);
+        d[12] = (uint8_t)((uint16_t)s.temp_centi_c >> 8U);
         d[13] = (uint8_t)s.age_ms;
         d[14] = (uint8_t)(s.age_ms >> 8);
         SendW2Frame(TYPE_QUERY, d, 15U);
@@ -496,6 +600,14 @@ static void process_a1_query(const uint8_t *data, uint8_t len)
             break;
         }
         process_damper_query();
+        break;
+    case OBJ_AUTO_CONTROL:
+        if (len != 1U)
+        {
+            send_error(TYPE_QUERY, STATUS_LENGTH_ERROR, OBJ_AUTO_CONTROL);
+            break;
+        }
+        process_auto_control_query();
         break;
     default:
         send_error(TYPE_QUERY, STATUS_UNSUPPORTED_OBJECT, obj);
@@ -608,6 +720,11 @@ static void process_a2_control(const uint8_t *data, uint8_t len)
     }
     case OBJ_FAN:
     {
+        if (!manual_control_is_allowed())
+        {
+            send_error(TYPE_CONTROL, STATUS_MODE_LOCKED, OBJ_FAN);
+            return;
+        }
         if (len < 4U) { send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_FAN); return; }
         uint8_t en = data[1];
         if (en > 1U) { send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_FAN); return; }
@@ -633,7 +750,15 @@ static void process_a2_control(const uint8_t *data, uint8_t len)
         process_onewire_control(data, len);
         break;
     case OBJ_DAMPER:
+        if (!manual_control_is_allowed())
+        {
+            send_error(TYPE_CONTROL, STATUS_MODE_LOCKED, OBJ_DAMPER);
+            break;
+        }
         process_damper_control(data, len);
+        break;
+    case OBJ_AUTO_CONTROL:
+        process_auto_control_control(data, len);
         break;
     default:
         send_error(TYPE_CONTROL, STATUS_UNSUPPORTED_OBJECT, obj);

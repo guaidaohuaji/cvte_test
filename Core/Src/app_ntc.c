@@ -72,6 +72,34 @@ static bool do_sample(uint16_t *adc_out)
     return true;
 }
 
+static void set_sensor_fault(void)
+{
+    snap.sensor_measurement_valid = false;
+    snap.range_status = APP_NTC_RANGE_SENSOR_FAULT;
+    snap.control_temp_centi_c = 0;
+}
+
+static void apply_range_status(int16_t tc)
+{
+    snap.sensor_measurement_valid = true;
+
+    if (tc < APP_NTC_MIN_TEMP_CENTI_C)
+    {
+        snap.range_status = APP_NTC_RANGE_CLAMPED_LOW;
+        snap.control_temp_centi_c = (int16_t)APP_NTC_MIN_TEMP_CENTI_C;
+    }
+    else if (tc > APP_NTC_MAX_TEMP_CENTI_C)
+    {
+        snap.range_status = APP_NTC_RANGE_CLAMPED_HIGH;
+        snap.control_temp_centi_c = (int16_t)APP_NTC_MAX_TEMP_CENTI_C;
+    }
+    else
+    {
+        snap.range_status = APP_NTC_RANGE_IN_RANGE;
+        snap.control_temp_centi_c = tc;
+    }
+}
+
 bool AppNtc_Init(void)
 {
     snap.state = APP_NTC_STATE_SEARCH;
@@ -80,6 +108,9 @@ bool AppNtc_Init(void)
     snap.resistance_ohm = 0U;
     snap.temp_centi_c = 0;
     snap.age_ms = 65535U;
+    snap.sensor_measurement_valid = false;
+    snap.range_status = APP_NTC_RANGE_SENSOR_FAULT;
+    snap.control_temp_centi_c = 0;
     last_sample_tick = 0U;
     last_ok_tick = 0U;
     init_ok = false;
@@ -87,6 +118,7 @@ bool AppNtc_Init(void)
     if (!check_config())
     {
         snap.state = APP_NTC_STATE_CONFIG_ERROR;
+        set_sensor_fault();
         return false;
     }
 
@@ -106,6 +138,7 @@ void AppNtc_Process(void)
     if (!do_sample(&adc))
     {
         snap.state = APP_NTC_STATE_ADC_ERROR;
+        set_sensor_fault();
         return;
     }
 
@@ -125,6 +158,7 @@ void AppNtc_Process(void)
         {
             snap.state = APP_NTC_STATE_SHORT_OR_OVER_TEMP;
         }
+        set_sensor_fault();
         return;
     }
 
@@ -135,24 +169,26 @@ void AppNtc_Process(void)
     {
         snap.temp_centi_c = 0;
         snap.state = APP_NTC_STATE_CALC_ERROR;
+        set_sensor_fault();
         return;
     }
 
     snap.temp_centi_c = tc;
+    apply_range_status(tc);
 
-    if (tc < APP_NTC_MIN_TEMP_CENTI_C)
+    if (snap.range_status == APP_NTC_RANGE_IN_RANGE)
+    {
+        snap.state = APP_NTC_STATE_OK;
+        last_ok_tick = now;
+    }
+    else if (snap.range_status == APP_NTC_RANGE_CLAMPED_LOW)
     {
         snap.state = APP_NTC_STATE_OPEN_OR_UNDER_TEMP;
-        return;
     }
-    if (tc > APP_NTC_MAX_TEMP_CENTI_C)
+    else
     {
         snap.state = APP_NTC_STATE_SHORT_OR_OVER_TEMP;
-        return;
     }
-
-    snap.state = APP_NTC_STATE_OK;
-    last_ok_tick = now;
 }
 
 bool AppNtc_GetSnapshot(AppNtcSnapshot *s)

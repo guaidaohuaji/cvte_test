@@ -23,6 +23,7 @@ typedef struct {
     uint32_t    fg_frequency_millihz;
     uint16_t    rpm;
     uint16_t    tach_age_ms;
+    uint8_t     tach_valid;
 } AppFanSnapshot;
 
 bool AppFan_Init(void);

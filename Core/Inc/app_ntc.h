@@ -14,6 +14,13 @@ typedef enum {
     APP_NTC_STATE_CONFIG_ERROR = 6
 } AppNtcState;
 
+typedef enum {
+    APP_NTC_RANGE_IN_RANGE = 0,
+    APP_NTC_RANGE_CLAMPED_LOW = 1,
+    APP_NTC_RANGE_CLAMPED_HIGH = 2,
+    APP_NTC_RANGE_SENSOR_FAULT = 3
+} AppNtcRangeStatus;
+
 typedef struct {
     AppNtcState state;
     uint16_t adc_raw;
@@ -21,6 +28,10 @@ typedef struct {
     uint32_t resistance_ohm;
     int16_t  temp_centi_c;
     uint16_t age_ms;
+
+    bool sensor_measurement_valid;
+    AppNtcRangeStatus range_status;
+    int16_t  control_temp_centi_c;
 } AppNtcSnapshot;
 
 bool AppNtc_Init(void);
