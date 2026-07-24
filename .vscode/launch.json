@@ -1,0 +1,33 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "J-Link Debug (Master)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build_master/test_master.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "servertype": "jlink",
+            "device": "STM32F407VE",
+            "interface": "swd",
+            "svdFile": "",
+            "runToEntryPoint": "main",
+            "preLaunchTask": "build master",
+            "armToolchainPath": "${env:LOCALAPPDATA}/arm-gnu-toolchain/bin"
+        },
+        {
+            "name": "J-Link Debug (Slave)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build_slave/test_slave.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "servertype": "jlink",
+            "device": "STM32F407VE",
+            "interface": "swd",
+            "svdFile": "",
+            "runToEntryPoint": "main",
+            "preLaunchTask": "build slave",
+            "armToolchainPath": "${env:LOCALAPPDATA}/arm-gnu-toolchain/bin"
+        }
+    ]
+}

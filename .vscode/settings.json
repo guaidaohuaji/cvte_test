@@ -1,0 +1,15 @@
+{
+    "files.associations": {
+        "*.s": "arm",
+        "*.S": "arm",
+        "*.h": "c",
+        "*.c": "c"
+    },
+    "cortex-debug.armToolchainPath": "${env:LOCALAPPDATA}/arm-gnu-toolchain/bin",
+    "cortex-debug.JLinkGDBServerPath": "C:\\Program Files (x86)\\SEGGER\\JLink\\JLinkGDBServerCL.exe",
+    "makefile.configureOnOpen": false,
+    "[c]": {
+        "editor.defaultFormatter": null
+    },
+    "cortex-debug.variableUseNaturalFormat": true
+}
