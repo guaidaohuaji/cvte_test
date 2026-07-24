@@ -13,6 +13,7 @@ typedef struct
     uint32_t uart_error_count;
     uint32_t tx_start_fail_count;
     uint32_t last_error_code;
+    uint32_t tail_echo_dropped;
 } AppOneWireUartStats;
 
 void AppOneWireUart_Init(void);

@@ -5,6 +5,8 @@
 #include "app_onewire_config.h"
 #include "usart.h"
 
+#define APP_ONEWIRE_TAIL_ECHO_WINDOW_MS  1U
+
 #if ((APP_ONEWIRE_UART_RX_RING_SIZE == 0U) || \
      ((APP_ONEWIRE_UART_RX_RING_SIZE & (APP_ONEWIRE_UART_RX_RING_SIZE - 1U)) != 0U))
 #error "APP_ONEWIRE_UART_RX_RING_SIZE must be a non-zero power of two"
@@ -25,6 +27,10 @@ static volatile uint8_t tx_active;
 static volatile uint8_t tx_done;
 
 static volatile AppOneWireUartStats uart_stats;
+
+static volatile uint8_t tail_echo_byte;
+static volatile uint8_t tail_echo_active;
+static volatile uint32_t tail_echo_tick;
 
 static uint16_t ring_next(uint16_t index)
 {
@@ -88,6 +94,10 @@ void AppOneWireUart_Init(void)
     tx_active = 0U;
     tx_done = 0U;
 
+    tail_echo_byte   = 0U;
+    tail_echo_tick   = 0U;
+    tail_echo_active = 0U;
+
     uart_stats.rx_byte_count = 0U;
     uart_stats.rx_during_tx_count = 0U;
     uart_stats.rx_overrun_count = 0U;
@@ -95,6 +105,7 @@ void AppOneWireUart_Init(void)
     uart_stats.uart_error_count = 0U;
     uart_stats.tx_start_fail_count = 0U;
     uart_stats.last_error_code = HAL_UART_ERROR_NONE;
+    uart_stats.tail_echo_dropped = 0U;
 
     if (!try_arm_rx())
     {
@@ -107,6 +118,16 @@ void AppOneWireUart_Process(void)
     if (rx_rearm_pending != 0U)
     {
         (void)try_arm_rx();
+    }
+
+    if (tail_echo_active != 0U)
+    {
+        uint32_t now = HAL_GetTick();
+        if ((uint32_t)(now - tail_echo_tick) >
+            APP_ONEWIRE_TAIL_ECHO_WINDOW_MS)
+        {
+            tail_echo_active = 0U;
+        }
     }
 }
 
@@ -135,12 +156,17 @@ bool AppOneWireUart_Send(const uint8_t *data, uint8_t length)
         }
     }
     tx_done = 0U;
+
+    tail_echo_byte   = tx_storage[length - 1U];
+    tail_echo_active = 0U;
+
     tx_active = 1U;
 
     status = HAL_UART_Transmit_IT(&huart6, tx_storage, length);
     if (status != HAL_OK)
     {
         tx_active = 0U;
+        tail_echo_active = 0U;
         uart_stats.tx_start_fail_count++;
         return false;
     }
@@ -188,12 +214,29 @@ bool AppOneWireUart_ReadByte(uint8_t *byte)
 void AppOneWireUart_RxCpltCallback(void)
 {
     uint8_t byte = rx_byte;
+    uint32_t now_tick = HAL_GetTick();
 
     uart_stats.rx_byte_count++;
 
     if (tx_active != 0U)
     {
         uart_stats.rx_during_tx_count++;
+    }
+    else if (tail_echo_active != 0U)
+    {
+        uint32_t elapsed = (uint32_t)(now_tick - tail_echo_tick);
+
+        if ((elapsed <= APP_ONEWIRE_TAIL_ECHO_WINDOW_MS) &&
+            (byte == tail_echo_byte))
+        {
+            tail_echo_active = 0U;
+            uart_stats.tail_echo_dropped++;
+        }
+        else
+        {
+            tail_echo_active = 0U;
+            ring_put(byte);
+        }
     }
     else
     {
@@ -208,8 +251,11 @@ void AppOneWireUart_RxCpltCallback(void)
 
 void AppOneWireUart_TxCpltCallback(void)
 {
+    tail_echo_tick   = HAL_GetTick();
+    tail_echo_active = 1U;
+
     tx_active = 0U;
-    tx_done = 1U;
+    tx_done   = 1U;
 }
 
 void AppOneWireUart_ErrorCallback(uint32_t error_code)
@@ -217,6 +263,7 @@ void AppOneWireUart_ErrorCallback(uint32_t error_code)
     uart_stats.last_error_code = error_code;
     uart_stats.uart_error_count++;
     rx_rearm_pending = 1U;
+    tail_echo_active = 0U;
 }
 
 void AppOneWireUart_GetStats(AppOneWireUartStats *stats)
@@ -233,4 +280,5 @@ void AppOneWireUart_GetStats(AppOneWireUartStats *stats)
     stats->uart_error_count = uart_stats.uart_error_count;
     stats->tx_start_fail_count = uart_stats.tx_start_fail_count;
     stats->last_error_code = uart_stats.last_error_code;
+    stats->tail_echo_dropped = uart_stats.tail_echo_dropped;
 }
