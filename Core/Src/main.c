@@ -137,9 +137,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    AppUart_Process();
     AppOneWireUart_Process();
     AppOneWire_Process();
+    AppUart_Process();
     AppLed_Process();
     AppPwmInput_Process();
     AppNtc_Process();
