@@ -1,0 +1,11 @@
+本发布包未包含重新构建的Master/Slave固件二进制。
+原因：生成环境没有arm-none-eabi-gcc和PowerShell。
+
+请在Windows工具链环境执行：
+  .\build.ps1 -Role master
+  .\build.ps1 -Role slave
+
+再烧录新生成的HEX/BIN。不要使用旧工程中的历史build_master/build_slave产物。
+
+本版本为step15：在step14带通测速正式接管的基础上，新增风机5秒100%启动加力、
+转速-PWM查表插值前馈、分级闭环微调、容差迟滞和同方向误差确认。

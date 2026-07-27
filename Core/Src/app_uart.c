@@ -1,0 +1,1035 @@
+#include "app_uart.h"
+#include "app_pwm.h"
+#include "app_pwm_input.h"
+#include "app_ntc.h"
+#include "app_fan.h"
+#include "app_onewire.h"
+#include "app_onewire_config.h"
+#include "app_led.h"
+#include "app_damper.h"
+#include "app_auto_control.h"
+#include "app_manual_fan_control.h"
+#include "usart.h"
+#include <stdbool.h>
+
+#define RING_SIZE   128U
+#define RING_MASK   (RING_SIZE - 1U)
+#define FRAME_MAX_DATA  32U
+#define FRAME_MAX_LEN   (FRAME_MAX_DATA + 2U)
+#define FRAME_BUF_SIZE  36U
+#define TIMEOUT_MS      50U
+
+#define TYPE_QUERY   0xA1U
+#define TYPE_CONTROL 0xA2U
+#define FRAME_HEADER 0x7EU
+
+#define OBJ_PWM_OUT  0x01U
+#define OBJ_LED      0x02U
+#define OBJ_PWM_IN   0x03U
+#define OBJ_PD13     0x04U
+#define OBJ_NTC      0x05U
+#define OBJ_FAN      0x06U
+#define OBJ_ONEWIRE  0x08U
+#define OBJ_DAMPER   0x07U
+#define OBJ_AUTO_CONTROL 0x09U
+
+#define DAMPER_A2_MOVE_ABSOLUTE        0x01U
+#define DAMPER_A2_MOVE_RELATIVE        0x02U
+#define DAMPER_A2_STOP                 0x03U
+#define DAMPER_A2_RELEASE              0x04U
+#define DAMPER_A2_SET_CURRENT_POSITION 0x05U
+
+#define FAN_QUERY_EXTENDED_V1          0x01U
+#define FAN_EXTENDED_SCHEMA_VERSION    0x01U
+
+#define STATUS_OK                    0x00U
+#define STATUS_LENGTH_ERROR          0x01U
+#define STATUS_CHECKSUM_ERROR        0x02U
+#define STATUS_UNSUPPORTED_TYPE      0x03U
+#define STATUS_UNSUPPORTED_OBJECT    0x04U
+#define STATUS_PARAM_RANGE           0x05U
+#define STATUS_APPLY_FAILED          0x06U
+#define STATUS_READ_ONLY             0x07U
+#define STATUS_NO_VALID_DATA         0x08U
+#define STATUS_BUSY                  0x09U
+#define STATUS_HW_ERROR              0x0AU
+#define STATUS_MODE_LOCKED            0x0BU
+
+typedef enum {
+    PARSER_WAIT_HEADER = 0,
+    PARSER_READ_TYPE,
+    PARSER_READ_LENGTH,
+    PARSER_READ_DATA,
+    PARSER_READ_CHECKSUM
+} ParserState;
+
+static volatile uint16_t rx_head;
+static volatile uint16_t rx_tail;
+static uint8_t          rx_ring[RING_SIZE];
+static volatile uint8_t rx_byte;
+static volatile bool    rx_overflow;
+
+static uint8_t  frame_buf[FRAME_BUF_SIZE];
+static uint8_t  frame_idx;
+static uint8_t  frame_len;
+static ParserState parser_state;
+static uint32_t  last_byte_tick;
+
+static bool ring_is_empty(void) { return rx_head == rx_tail; }
+static bool ring_is_full(void)  { return ((rx_head + 1U) & RING_MASK) == rx_tail; }
+
+static void ring_put(uint8_t byte)
+{
+    uint16_t next = (rx_head + 1U) & RING_MASK;
+    rx_ring[rx_head] = byte;
+    rx_head = next;
+}
+
+static uint8_t ring_get(void)
+{
+    uint8_t byte = rx_ring[rx_tail];
+    rx_tail = (rx_tail + 1U) & RING_MASK;
+    return byte;
+}
+
+static void reset_parser(void)
+{
+    parser_state = PARSER_WAIT_HEADER;
+    frame_idx    = 0U;
+    frame_len    = 0U;
+}
+
+static void send_binary(const uint8_t *data, uint16_t len)
+{
+    HAL_UART_Transmit(&huart1, (uint8_t *)data, len, 100U);
+}
+
+static bool SendW2Frame(uint8_t type, const uint8_t *data, uint8_t data_len)
+{
+    if (data_len > FRAME_MAX_DATA) return false;
+
+    uint8_t buf[FRAME_BUF_SIZE];
+    uint8_t total = 1U + 1U + 1U + data_len + 1U;
+
+    buf[0] = FRAME_HEADER;
+    buf[1] = type;
+    buf[2] = data_len + 2U;
+
+    uint8_t csum = buf[1] + buf[2];
+    for (uint8_t i = 0U; i < data_len; i++)
+    {
+        buf[3U + i] = data[i];
+        csum += data[i];
+    }
+    buf[3U + data_len] = csum;
+
+    send_binary(buf, total);
+    return true;
+}
+
+static void send_error(uint8_t type, uint8_t status, uint8_t obj_id)
+{
+    uint8_t d[2];
+    d[0] = status;
+    d[1] = obj_id;
+    SendW2Frame(type, d, 2U);
+}
+
+static uint8_t onewire_submit_status(AppOneWireSubmitResult result)
+{
+    switch (result)
+    {
+    case APP_ONEWIRE_SUBMIT_OK:
+        return STATUS_OK;
+    case APP_ONEWIRE_SUBMIT_BUSY:
+        return STATUS_BUSY;
+    case APP_ONEWIRE_SUBMIT_INVALID_OPERATION:
+    case APP_ONEWIRE_SUBMIT_INVALID_ADDRESS:
+        return STATUS_PARAM_RANGE;
+    case APP_ONEWIRE_SUBMIT_NOT_MASTER:
+        return STATUS_READ_ONLY;
+    default:
+        return STATUS_APPLY_FAILED;
+    }
+}
+
+static void process_onewire_query(void)
+{
+    AppOneWireSnapshot snapshot;
+    uint8_t d[16];
+
+    AppOneWire_GetSnapshot(&snapshot);
+
+    d[0] = STATUS_OK;
+    d[1] = OBJ_ONEWIRE;
+    d[2] = (uint8_t)snapshot.role;
+    d[3] = (uint8_t)snapshot.link_state;
+    d[4] = snapshot.busy ? 1U : 0U;
+    d[5] = snapshot.pending_valid ? 1U : 0U;
+    d[6] = snapshot.last_operation;
+    d[7] = (uint8_t)snapshot.result_code;
+    d[8] = (uint8_t)snapshot.address;
+    d[9] = (uint8_t)(snapshot.address >> 8U);
+    d[10] = (uint8_t)snapshot.value;
+    d[11] = (uint8_t)(snapshot.value >> 8U);
+    d[12] = 0U;
+    d[13] = 0U;
+    d[14] = 0U;
+    d[15] = 0U;
+
+    (void)SendW2Frame(TYPE_QUERY, d, (uint8_t)sizeof(d));
+}
+
+static void process_onewire_control(const uint8_t *data, uint8_t len)
+{
+    uint8_t operation;
+    uint16_t address;
+    uint16_t value;
+    AppOneWireSubmitResult submit_result;
+    uint8_t status;
+
+    if (len != 6U)
+    {
+        send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_ONEWIRE);
+        return;
+    }
+
+    operation = data[1];
+    address = (uint16_t)data[2] | ((uint16_t)data[3] << 8U);
+    value = (uint16_t)data[4] | ((uint16_t)data[5] << 8U);
+
+    if (((operation == APP_ONEWIRE_OPERATION_REHANDSHAKE) &&
+         ((address != 0U) || (value != 0U))) ||
+        ((operation == APP_ONEWIRE_OPERATION_READ) && (value != 0U)))
+    {
+        send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_ONEWIRE);
+        return;
+    }
+
+    submit_result = AppOneWire_Submit(operation, address, value);
+    status = onewire_submit_status(submit_result);
+    send_error(TYPE_CONTROL, status, OBJ_ONEWIRE);
+}
+
+static void write_u16_le(uint8_t *dst, uint16_t value)
+{
+    dst[0] = (uint8_t)value;
+    dst[1] = (uint8_t)(value >> 8U);
+}
+
+static void write_u32_le(uint8_t *dst, uint32_t value)
+{
+    dst[0] = (uint8_t)value;
+    dst[1] = (uint8_t)(value >> 8U);
+    dst[2] = (uint8_t)(value >> 16U);
+    dst[3] = (uint8_t)(value >> 24U);
+}
+
+static void write_i32_le(uint8_t *dst, int32_t value)
+{
+    write_u32_le(dst, (uint32_t)value);
+}
+
+static void process_damper_query(void)
+{
+    DamperSnapshot snapshot;
+    uint8_t d[23];
+
+    AppDamper_GetSnapshot(&snapshot);
+
+    d[0] = STATUS_OK;
+    d[1] = OBJ_DAMPER;
+    d[2] = snapshot.damper_state;
+    d[3] = snapshot.flags;
+    write_i32_le(&d[4],  snapshot.current_steps);
+    write_i32_le(&d[8],  snapshot.target_steps);
+    write_u32_le(&d[12], snapshot.remaining_steps);
+    write_u16_le(&d[16], snapshot.full_travel_steps);
+    write_u16_le(&d[18], snapshot.configured_pps);
+    d[20] = snapshot.last_command;
+    d[21] = snapshot.last_result;
+    d[22] = snapshot.fault_flags;
+
+    (void)SendW2Frame(TYPE_QUERY, d, (uint8_t)sizeof(d));
+}
+
+
+static uint16_t saturate_u32_to_u16(uint32_t value)
+{
+    return (value > UINT16_MAX) ? UINT16_MAX : (uint16_t)value;
+}
+
+static void write_i16_le(uint8_t *dst, int16_t value)
+{
+    write_u16_le(dst, (uint16_t)value);
+}
+
+static uint8_t manual_fan_result_to_w2(AppManualFanResult result)
+{
+    switch (result)
+    {
+    case APP_MANUAL_FAN_RESULT_OK:
+        return STATUS_OK;
+    case APP_MANUAL_FAN_RESULT_INVALID_PARAM:
+        return STATUS_PARAM_RANGE;
+    case APP_MANUAL_FAN_RESULT_MODE_LOCKED:
+        return STATUS_MODE_LOCKED;
+    case APP_MANUAL_FAN_RESULT_HW_ERROR:
+    default:
+        return STATUS_HW_ERROR;
+    }
+}
+
+static void process_fan_legacy_query(void)
+{
+    AppFanSnapshot s;
+    uint8_t d[18];
+
+    if (!AppFan_GetSnapshot(&s))
+    {
+        send_error(TYPE_QUERY, STATUS_HW_ERROR, OBJ_FAN);
+        return;
+    }
+
+    d[0]  = STATUS_OK;
+    d[1]  = OBJ_FAN;
+    d[2]  = (uint8_t)s.state;
+    d[3]  = s.enabled ? 1U : 0U;
+    write_u16_le(&d[4], s.target_duty_x100);
+    write_u16_le(&d[6], s.applied_duty_x100);
+    write_u16_le(&d[8], s.pwm_frequency_hz);
+    write_u32_le(&d[10], s.fg_frequency_millihz);
+    write_u16_le(&d[14], s.rpm);
+    write_u16_le(&d[16], s.tach_age_ms);
+
+    (void)SendW2Frame(TYPE_QUERY, d, (uint8_t)sizeof(d));
+}
+
+static void process_fan_extended_query(void)
+{
+    AppFanSnapshot fan;
+    AppManualFanControlSnapshot manual;
+    uint8_t d[32];
+    uint8_t flags = 0U;
+    uint8_t auto_mode;
+
+    if (!AppFan_GetSnapshot(&fan) ||
+        !AppManualFanControl_GetSnapshot(&manual))
+    {
+        send_error(TYPE_QUERY, STATUS_HW_ERROR, OBJ_FAN);
+        return;
+    }
+
+    auto_mode = AppAutoControl_GetMode();
+
+    if (fan.enabled)
+        flags |= 0x01U;
+    if (fan.tach_valid)
+        flags |= 0x02U;
+    if (manual.tach_valid != 0U)
+        flags |= 0x04U;
+    if (manual.in_tolerance != 0U)
+        flags |= 0x08U;
+    if (auto_mode == APP_AUTO_MODE_AUTO)
+        flags |= 0x10U;
+    if (fan.state == APP_FAN_STATE_STARTUP_BOOST)
+        flags |= 0x20U;
+    if ((fan.state == APP_FAN_STATE_NO_TACH) ||
+        (manual.control_state == APP_MANUAL_FAN_CTRL_TACH_FAULT))
+    {
+        flags |= 0x40U;
+    }
+    if ((fan.state == APP_FAN_STATE_PWM_ERROR) ||
+        (fan.state == APP_FAN_STATE_CONFIG_ERROR) ||
+        (manual.control_state == APP_MANUAL_FAN_CTRL_HW_ERROR))
+    {
+        flags |= 0x80U;
+    }
+
+    d[0] = STATUS_OK;
+    d[1] = OBJ_FAN;
+    d[2] = FAN_EXTENDED_SCHEMA_VERSION;
+    d[3] = manual.mode;
+    d[4] = manual.control_state;
+    d[5] = flags;
+    write_u16_le(&d[6], manual.target_rpm);
+    write_i16_le(&d[8], manual.rpm_error);
+    write_u16_le(&d[10], manual.feedforward_duty_x100);
+    write_u16_le(&d[12], fan.target_duty_x100);
+    write_u16_le(&d[14], fan.applied_duty_x100);
+    write_u16_le(&d[16], fan.pwm_frequency_hz);
+    write_u32_le(&d[18], fan.fg_frequency_millihz);
+    write_u16_le(&d[22], fan.rpm);
+    write_u16_le(&d[24], fan.tach_age_ms);
+    write_u16_le(&d[26], saturate_u32_to_u16(manual.adjust_count));
+    write_u16_le(&d[28], saturate_u32_to_u16(manual.fault_count));
+    d[30] = auto_mode;
+    d[31] = 0U;
+
+    (void)SendW2Frame(TYPE_QUERY, d, (uint8_t)sizeof(d));
+}
+
+static void process_fan_query(const uint8_t *data, uint8_t len)
+{
+    /* Historical firmware ignored trailing query bytes for object 0x06.
+       Preserve that behavior.  Only the exact two-byte selector below asks
+       for the versioned extended response. */
+    if ((len == 2U) && (data[1] == FAN_QUERY_EXTENDED_V1))
+    {
+        process_fan_extended_query();
+        return;
+    }
+
+    process_fan_legacy_query();
+}
+
+static void process_fan_control(const uint8_t *data, uint8_t len)
+{
+    uint8_t mode;
+    uint16_t value;
+    AppManualFanResult result;
+
+    /* Preserve the historical priority: any manual fan command is locked
+       out while global AUTO owns the actuators, even if the payload is
+       otherwise malformed. */
+    if (AppAutoControl_GetMode() != APP_AUTO_MODE_MANUAL)
+    {
+        send_error(TYPE_CONTROL, STATUS_MODE_LOCKED, OBJ_FAN);
+        return;
+    }
+
+    /* Keep the legacy minimum-length rule so old senders with harmless
+       trailing bytes remain compatible. */
+    if (len < 4U)
+    {
+        send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_FAN);
+        return;
+    }
+
+    mode = data[1];
+    value = (uint16_t)data[2] | ((uint16_t)data[3] << 8U);
+
+    switch (mode)
+    {
+    case APP_MANUAL_FAN_MODE_OFF:
+        if (value != 0U)
+        {
+            send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_FAN);
+            return;
+        }
+        result = AppManualFanControl_SetOff();
+        break;
+
+    case APP_MANUAL_FAN_MODE_DUTY:
+        result = AppManualFanControl_SetDuty(value);
+        break;
+
+    case APP_MANUAL_FAN_MODE_SPEED:
+        result = AppManualFanControl_SetTargetRpm(value);
+        break;
+
+    default:
+        send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_FAN);
+        return;
+    }
+
+    send_error(TYPE_CONTROL, manual_fan_result_to_w2(result), OBJ_FAN);
+}
+
+static int32_t damper_read_int32le(const uint8_t *data, uint8_t offset)
+{
+    uint32_t raw = (uint32_t)data[offset] |
+                   ((uint32_t)data[offset + 1U] << 8U) |
+                   ((uint32_t)data[offset + 2U] << 16U) |
+                   ((uint32_t)data[offset + 3U] << 24U);
+    return (int32_t)raw;
+}
+
+static uint8_t damper_status_to_w2(DamperStatus damper_status)
+{
+    switch (damper_status)
+    {
+    case DAMPER_STATUS_OK:            return STATUS_OK;
+    case DAMPER_STATUS_BUSY:          return STATUS_BUSY;
+    case DAMPER_STATUS_PARAM_RANGE:   return STATUS_PARAM_RANGE;
+    case DAMPER_STATUS_NO_VALID_DATA: return STATUS_NO_VALID_DATA;
+    case DAMPER_STATUS_READ_ONLY:     return STATUS_READ_ONLY;
+    case DAMPER_STATUS_HW_ERROR:
+    default:                          return STATUS_HW_ERROR;
+    }
+}
+
+static void process_damper_control(const uint8_t *data, uint8_t len)
+{
+    uint8_t  sub_cmd;
+    uint8_t  damper_status;
+    int32_t  value;
+
+    if (len < 2U)
+    {
+        send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+        return;
+    }
+
+    sub_cmd = data[1];
+
+    switch (sub_cmd)
+    {
+    case DAMPER_A2_MOVE_ABSOLUTE:
+        if (len != 6U)
+        {
+            send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            return;
+        }
+        value = damper_read_int32le(data, 2U);
+        damper_status = AppDamper_MoveAbsolute(value);
+        break;
+
+    case DAMPER_A2_MOVE_RELATIVE:
+        if (len != 6U)
+        {
+            send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            return;
+        }
+        value = damper_read_int32le(data, 2U);
+        damper_status = AppDamper_MoveRelative(value);
+        break;
+
+    case DAMPER_A2_STOP:
+        if (len != 2U)
+        {
+            send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            return;
+        }
+        damper_status = AppDamper_Stop();
+        break;
+
+    case DAMPER_A2_RELEASE:
+        if (len != 2U)
+        {
+            send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            return;
+        }
+        damper_status = AppDamper_Release();
+        break;
+
+    case DAMPER_A2_SET_CURRENT_POSITION:
+        if (len != 6U)
+        {
+            send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            return;
+        }
+        value = damper_read_int32le(data, 2U);
+        damper_status = AppDamper_SetCurrentPosition(value);
+        break;
+
+    default:
+        send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_DAMPER);
+        return;
+    }
+
+    send_error(TYPE_CONTROL, damper_status_to_w2(damper_status), OBJ_DAMPER);
+}
+
+static bool manual_control_is_allowed(void)
+{
+    return (AppAutoControl_GetMode() == APP_AUTO_MODE_MANUAL);
+}
+
+static void process_auto_control_query(void)
+{
+    AppAutoControlSnapshot snap;
+    uint8_t d[28];
+
+    AppAutoControl_GetSnapshot(&snap);
+
+    d[0] = STATUS_OK;
+    d[1] = OBJ_AUTO_CONTROL;
+    d[2] = snap.mode;
+    d[3] = snap.state;
+    {
+        uint8_t f = 0x00U;
+        if (snap.flags & 0x01U) f |= 0x01U;
+        if (snap.flags & 0x08U) f |= 0x02U;
+        if (snap.flags & 0x10U) f |= 0x04U;
+        if (snap.fan_tach_valid) f |= 0x08U;
+        if (snap.flags & 0x80U) f |= 0x10U;
+        if (snap.damper_position_valid) f |= 0x20U;
+        if (snap.damper_control_state == APP_AUTO_DAMPER_CTRL_FAULT) f |= 0x40U;
+        if (snap.damper_auto_owned) f |= 0x80U;
+        d[4] = f;
+    }
+    d[5] = snap.fan_control_state;
+    d[6] = snap.damper_control_state;
+    d[7] = snap.ntc_range_status;
+    {
+        uint16_t u = (uint16_t)snap.control_temp_centi_c;
+        d[8]  = (uint8_t)(u & 0xFFU);
+        d[9]  = (uint8_t)(u >> 8U);
+    }
+    d[10] = (uint8_t)snap.target_fan_rpm;
+    d[11] = (uint8_t)(snap.target_fan_rpm >> 8U);
+    d[12] = (uint8_t)snap.actual_fan_rpm;
+    d[13] = (uint8_t)(snap.actual_fan_rpm >> 8U);
+    d[14] = (uint8_t)snap.applied_fan_duty_x100;
+    d[15] = (uint8_t)(snap.applied_fan_duty_x100 >> 8U);
+    {
+        uint16_t u = (uint16_t)snap.target_damper_steps;
+        d[16] = (uint8_t)(u & 0xFFU);
+        d[17] = (uint8_t)(u >> 8U);
+    }
+    {
+        uint16_t u = (uint16_t)snap.actual_damper_steps;
+        d[18] = (uint8_t)(u & 0xFFU);
+        d[19] = (uint8_t)(u >> 8U);
+    }
+    {
+        uint16_t u = (uint16_t)snap.fan_error_rpm;
+        d[20] = (uint8_t)(u & 0xFFU);
+        d[21] = (uint8_t)(u >> 8U);
+    }
+    {
+        uint16_t u = (uint16_t)snap.damper_error_steps;
+        d[22] = (uint8_t)(u & 0xFFU);
+        d[23] = (uint8_t)(u >> 8U);
+    }
+    d[24] = (uint8_t)snap.update_seq;
+    d[25] = (uint8_t)(snap.update_seq >> 8U);
+    d[26] = (uint8_t)(snap.update_seq >> 16U);
+    d[27] = (uint8_t)(snap.update_seq >> 24U);
+
+    (void)SendW2Frame(TYPE_QUERY, d, (uint8_t)sizeof(d));
+}
+
+static void process_auto_control_control(const uint8_t *data, uint8_t len)
+{
+    uint8_t new_mode;
+    uint8_t result;
+
+    if (len != 2U)
+    {
+        send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_AUTO_CONTROL);
+        return;
+    }
+
+    new_mode = data[1];
+
+    if (new_mode != APP_AUTO_MODE_MANUAL && new_mode != APP_AUTO_MODE_AUTO)
+    {
+        send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_AUTO_CONTROL);
+        return;
+    }
+
+    result = AppAutoControl_SetMode(new_mode);
+
+    if (result == APP_AUTO_SET_MODE_OK)
+        send_error(TYPE_CONTROL, STATUS_OK, OBJ_AUTO_CONTROL);
+    else if (result == APP_AUTO_SET_MODE_INVALID_PARAM)
+        send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_AUTO_CONTROL);
+    else if (result == APP_AUTO_SET_MODE_UNAVAILABLE)
+        send_error(TYPE_CONTROL, STATUS_READ_ONLY, OBJ_AUTO_CONTROL);
+    else
+        send_error(TYPE_CONTROL, STATUS_HW_ERROR, OBJ_AUTO_CONTROL);
+}
+
+/* PD15 drives an inverting NPN collector output:
+   PD15 HIGH -> transistor ON  -> collector output LOW.
+   PD15 LOW  -> transistor OFF -> collector output HIGH
+                when external collector pull-up/load is present.
+   Software returns the PD15 pin drive state (ODR), not collector level. */
+
+static bool pd13_get(void)
+{
+    return ((GPIOD->ODR & GPIO_PIN_13) != 0U);
+}
+
+static bool pd13_set(bool high)
+{
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13,
+        high ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    return (((GPIOD->ODR & GPIO_PIN_13) != 0U) == high);
+}
+
+static void process_a1_query(const uint8_t *data, uint8_t len)
+{
+    if (len < 1U) { send_error(TYPE_QUERY, STATUS_LENGTH_ERROR, 0x00U); return; }
+    uint8_t obj = data[0];
+
+    switch (obj)
+    {
+    case OBJ_PWM_OUT:
+    {
+        uint8_t d[9];
+        d[0] = STATUS_OK;
+        d[1] = OBJ_PWM_OUT;
+        d[2] = AppPwm_IsEnabled() ? 1U : 0U;
+        uint32_t freq = AppPwm_GetActualFrequency();
+        uint16_t duty = AppPwm_IsEnabled() ? AppPwm_GetActualDutyX100()
+                                           : AppPwm_GetTargetDutyX100();
+        d[3] = (uint8_t)freq;
+        d[4] = (uint8_t)(freq >> 8);
+        d[5] = (uint8_t)(freq >> 16);
+        d[6] = (uint8_t)(freq >> 24);
+        d[7] = (uint8_t)duty;
+        d[8] = (uint8_t)(duty >> 8);
+        SendW2Frame(TYPE_QUERY, d, 9U);
+        break;
+    }
+    case OBJ_LED:
+    {
+        uint8_t d[4];
+        d[0] = STATUS_OK;
+        d[1] = OBJ_LED;
+        d[2] = (uint8_t)AppLed_GetMode();
+        d[3] = AppLed_IsOn() ? 1U : 0U;
+        SendW2Frame(TYPE_QUERY, d, 4U);
+        break;
+    }
+    case OBJ_PWM_IN:
+    {
+        AppPwmInputSnapshot snap;
+        if (!AppPwmInput_GetSnapshot(&snap))
+        {
+            send_error(TYPE_QUERY, STATUS_HW_ERROR, OBJ_PWM_IN);
+            return;
+        }
+        uint8_t d[11];
+        d[0] = STATUS_OK;
+        d[1] = OBJ_PWM_IN;
+        d[2] = (uint8_t)snap.status;
+        uint32_t fm = (snap.status == APP_PWM_IN_OK) ? snap.freq_millihz : 0U;
+        uint16_t dx = (snap.status == APP_PWM_IN_OK) ? snap.duty_x100 : 0U;
+        d[3] = (uint8_t)fm;
+        d[4] = (uint8_t)(fm >> 8);
+        d[5] = (uint8_t)(fm >> 16);
+        d[6] = (uint8_t)(fm >> 24);
+        d[7] = (uint8_t)dx;
+        d[8] = (uint8_t)(dx >> 8);
+        uint16_t age = (snap.age_ms > 65535U) ? 65535U : (uint16_t)snap.age_ms;
+        d[9]  = (uint8_t)age;
+        d[10] = (uint8_t)(age >> 8);
+        SendW2Frame(TYPE_QUERY, d, 11U);
+        break;
+    }
+    case OBJ_PD13:
+    {
+        uint8_t d[3];
+        d[0] = STATUS_OK;
+        d[1] = OBJ_PD13;
+        d[2] = pd13_get() ? 0x01U : 0x00U;
+        SendW2Frame(TYPE_QUERY, d, 3U);
+        break;
+    }
+    case OBJ_FAN:
+        process_fan_query(data, len);
+        break;
+    case OBJ_NTC:
+    {
+        AppNtcSnapshot s;
+        if (!AppNtc_GetSnapshot(&s))
+        {
+            send_error(TYPE_QUERY, STATUS_HW_ERROR, OBJ_NTC);
+            return;
+        }
+        uint8_t d[15];
+        d[0] = STATUS_OK;
+        d[1] = OBJ_NTC;
+        d[2] = (uint8_t)s.state;
+        d[3] = (uint8_t)s.adc_raw;
+        d[4] = (uint8_t)(s.adc_raw >> 8);
+        d[5] = (uint8_t)s.voltage_mv;
+        d[6] = (uint8_t)(s.voltage_mv >> 8);
+        d[7]  = (uint8_t)s.resistance_ohm;
+        d[8]  = (uint8_t)(s.resistance_ohm >> 8);
+        d[9]  = (uint8_t)(s.resistance_ohm >> 16);
+        d[10] = (uint8_t)(s.resistance_ohm >> 24);
+        d[11] = (uint8_t)s.temp_centi_c;
+        d[12] = (uint8_t)((uint16_t)s.temp_centi_c >> 8U);
+        d[13] = (uint8_t)s.age_ms;
+        d[14] = (uint8_t)(s.age_ms >> 8);
+        SendW2Frame(TYPE_QUERY, d, 15U);
+        break;
+    }
+    case OBJ_ONEWIRE:
+        process_onewire_query();
+        break;
+    case OBJ_DAMPER:
+        if (len != 1U)
+        {
+            send_error(TYPE_QUERY, STATUS_LENGTH_ERROR, OBJ_DAMPER);
+            break;
+        }
+        process_damper_query();
+        break;
+    case OBJ_AUTO_CONTROL:
+        if (len != 1U)
+        {
+            send_error(TYPE_QUERY, STATUS_LENGTH_ERROR, OBJ_AUTO_CONTROL);
+            break;
+        }
+        process_auto_control_query();
+        break;
+    default:
+        send_error(TYPE_QUERY, STATUS_UNSUPPORTED_OBJECT, obj);
+        break;
+    }
+}
+
+static void process_a2_control(const uint8_t *data, uint8_t len)
+{
+    if (len < 1U) { send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, 0x00U); return; }
+    uint8_t obj = data[0];
+
+    switch (obj)
+    {
+    case OBJ_PWM_OUT:
+    {
+        if (len < 8U) { send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_PWM_OUT); return; }
+        uint8_t en = data[1];
+        if (en > 1U) { send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_PWM_OUT); return; }
+
+        if (en == 1U)
+        {
+            uint32_t freq = (uint32_t)data[2] |
+                           ((uint32_t)data[3] << 8) |
+                           ((uint32_t)data[4] << 16) |
+                           ((uint32_t)data[5] << 24);
+            uint16_t duty = (uint16_t)data[6] | ((uint16_t)data[7] << 8);
+
+            if ((freq < 1U) || (freq > 100000U) || (duty > 10000U))
+            {
+                send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_PWM_OUT);
+                return;
+            }
+            if (!AppPwm_SetFrequency(freq) ||
+                !AppPwm_SetDutyX100(duty))
+            {
+                send_error(TYPE_CONTROL, STATUS_APPLY_FAILED, OBJ_PWM_OUT);
+                return;
+            }
+            if (!AppPwm_Enable(true))
+            {
+                send_error(TYPE_CONTROL, STATUS_APPLY_FAILED, OBJ_PWM_OUT);
+                return;
+            }
+        }
+        else
+        {
+            uint32_t fz = (uint32_t)data[2] |
+                         ((uint32_t)data[3] << 8) |
+                         ((uint32_t)data[4] << 16) |
+                         ((uint32_t)data[5] << 24);
+            uint16_t dz = (uint16_t)data[6] | ((uint16_t)data[7] << 8);
+            if ((fz != 0U) || (dz != 0U))
+            {
+                send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_PWM_OUT);
+                return;
+            }
+            if (!AppPwm_Enable(false))
+            {
+                send_error(TYPE_CONTROL, STATUS_APPLY_FAILED, OBJ_PWM_OUT);
+                return;
+            }
+        }
+        uint8_t r[2];
+        r[0] = STATUS_OK;
+        r[1] = OBJ_PWM_OUT;
+        SendW2Frame(TYPE_CONTROL, r, 2U);
+        break;
+    }
+    case OBJ_LED:
+    {
+        if (len < 2U) { send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_LED); return; }
+        uint8_t cmd = data[1];
+        if (cmd > 2U) { send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_LED); return; }
+
+        if (cmd == 2U)
+        {
+            AppLed_SetAutomatic();
+        }
+        else
+        {
+            AppLed_SetManual(cmd == 1U);
+        }
+
+        uint8_t r[2];
+        r[0] = STATUS_OK;
+        r[1] = OBJ_LED;
+        SendW2Frame(TYPE_CONTROL, r, 2U);
+        break;
+    }
+    case OBJ_PD13:
+    {
+        if (len < 2U) { send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_PD13); return; }
+        uint8_t lvl = data[1];
+        if ((lvl != 0x00U) && (lvl != 0x01U))
+        {
+            send_error(TYPE_CONTROL, STATUS_PARAM_RANGE, OBJ_PD13);
+            return;
+        }
+        if (!pd13_set(lvl == 0x01U))
+        {
+            send_error(TYPE_CONTROL, STATUS_APPLY_FAILED, OBJ_PD13);
+            return;
+        }
+        uint8_t r[2];
+        r[0] = STATUS_OK;
+        r[1] = OBJ_PD13;
+        SendW2Frame(TYPE_CONTROL, r, 2U);
+        break;
+    }
+    case OBJ_FAN:
+        process_fan_control(data, len);
+        break;
+    case OBJ_NTC:
+        send_error(TYPE_CONTROL, STATUS_READ_ONLY, OBJ_NTC);
+        break;
+    case OBJ_PWM_IN:
+        send_error(TYPE_CONTROL, STATUS_READ_ONLY, OBJ_PWM_IN);
+        break;
+    case OBJ_ONEWIRE:
+        process_onewire_control(data, len);
+        break;
+    case OBJ_DAMPER:
+        if (!manual_control_is_allowed())
+        {
+            send_error(TYPE_CONTROL, STATUS_MODE_LOCKED, OBJ_DAMPER);
+            break;
+        }
+        process_damper_control(data, len);
+        break;
+    case OBJ_AUTO_CONTROL:
+        process_auto_control_control(data, len);
+        break;
+    default:
+        send_error(TYPE_CONTROL, STATUS_UNSUPPORTED_OBJECT, obj);
+        break;
+    }
+}
+
+static void dispatch_frame(void)
+{
+    if ((frame_len < 2U) || (frame_len > FRAME_MAX_LEN))
+    {
+        return;
+    }
+
+    uint8_t type = frame_buf[0];
+    uint8_t len_field = frame_buf[1];
+    uint8_t data_len = len_field - 2U;
+
+    if (data_len > FRAME_MAX_DATA) { return; }
+
+    uint8_t csum = type + len_field;
+    for (uint8_t i = 0U; i < data_len; i++)
+    {
+        csum += frame_buf[2U + i];
+    }
+    if (csum != frame_buf[2U + data_len]) { return; }
+
+    const uint8_t *d = &frame_buf[2U];
+
+    if (type == TYPE_QUERY)        { process_a1_query(d, data_len); }
+    else if (type == TYPE_CONTROL)  { process_a2_control(d, data_len); }
+}
+
+static void handle_byte(uint8_t byte)
+{
+    last_byte_tick = HAL_GetTick();
+
+    switch (parser_state)
+    {
+    case PARSER_WAIT_HEADER:
+        if (byte == FRAME_HEADER)
+        {
+            parser_state = PARSER_READ_TYPE;
+            frame_idx    = 0U;
+            frame_len    = 0U;
+        }
+        break;
+
+    case PARSER_READ_TYPE:
+        frame_buf[frame_idx++] = byte;
+        parser_state = PARSER_READ_LENGTH;
+        break;
+
+    case PARSER_READ_LENGTH:
+        frame_len = byte;
+        if ((frame_len < 2U) || (frame_len > FRAME_MAX_LEN))
+        {
+            reset_parser();
+            break;
+        }
+        frame_buf[frame_idx++] = byte;
+        parser_state = PARSER_READ_DATA;
+        break;
+
+    case PARSER_READ_DATA:
+    {
+        uint8_t needed = frame_len - 2U;
+        frame_buf[frame_idx++] = byte;
+        if (frame_idx >= (2U + needed))
+        {
+            parser_state = PARSER_READ_CHECKSUM;
+        }
+        break;
+    }
+
+    case PARSER_READ_CHECKSUM:
+        frame_buf[frame_idx++] = byte;
+        dispatch_frame();
+        reset_parser();
+        break;
+    }
+}
+
+void AppUart_Init(void)
+{
+    rx_head    = 0U;
+    rx_tail    = 0U;
+    rx_overflow = false;
+    reset_parser();
+    HAL_UART_Receive_IT(&huart1, (uint8_t *)&rx_byte, 1U);
+}
+
+void AppUart_Process(void)
+{
+    if (parser_state != PARSER_WAIT_HEADER)
+    {
+        if ((HAL_GetTick() - last_byte_tick) > TIMEOUT_MS)
+        {
+            reset_parser();
+        }
+    }
+
+    while (!ring_is_empty())
+    {
+        uint8_t byte = ring_get();
+        handle_byte(byte);
+    }
+
+    if (rx_overflow)
+    {
+        rx_overflow = false;
+        reset_parser();
+    }
+}
+
+void AppUart_RxCpltCallback(void)
+{
+    if (ring_is_full())
+    {
+        rx_overflow = true;
+    }
+    else
+    {
+        ring_put(rx_byte);
+    }
+    HAL_UART_Receive_IT(&huart1, (uint8_t *)&rx_byte, 1U);
+}
+
+void AppUart_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance != USART1) { return; }
+    HAL_UART_Receive_IT(&huart1, (uint8_t *)&rx_byte, 1U);
+}
