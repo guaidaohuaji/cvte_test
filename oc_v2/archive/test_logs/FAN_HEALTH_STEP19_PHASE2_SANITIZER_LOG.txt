@@ -1,0 +1,5 @@
+=== app_fan safety lock ASan/UBSan ===
+fan startup and safety-lock tests passed
+=== app_fan_health ASan/UBSan ===
+fan health formal shutdown phase-2 tests passed
+sanitizer verification passed

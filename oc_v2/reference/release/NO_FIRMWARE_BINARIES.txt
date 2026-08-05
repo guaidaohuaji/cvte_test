@@ -1,0 +1,13 @@
+本发布包未包含重新构建的Master/Slave固件二进制。
+原因：生成环境没有arm-none-eabi-gcc和PowerShell。
+
+请在Windows工具链环境执行：
+  .\build.ps1 -Role master
+  .\build.ps1 -Role slave
+
+再烧录新生成的HEX/BIN。不要使用旧工程中的历史build_master/build_slave产物。
+
+本版本为step19：在step18风机健康影子诊断基础上，将连续5秒的转速偏差或测速丢失
+升级为正式故障锁存。确认故障后底层立即强制PWM为0%，并阻止AUTO和手动路径重新
+启动。清除故障后风机仍保持关闭，必须由明确的新手动命令或重新发送AUTO模式命令
+授权重启。本阶段尚未增加W2清故障命令和上位机故障详情。

@@ -1,0 +1,241 @@
+单总线 UART 第12步：全工程静态集成审计报告
+============================================
+
+审计对象：cvte_test-step11-led-arbitration
+审计方式：只读源码检查、严格主机单元测试、外部端到端状态机仿真
+源码修改：无
+CubeMX：未运行
+ARM目标构建：未执行（当前环境没有 arm-none-eabi-gcc）
+硬件测试：未执行
+
+一、名义通信路径结论
+--------------------
+当前版本在无HAL异常、主循环能及时运行的名义路径下，主从逻辑闭环成立：
+
+1. 主机上电自动发送握手1；
+2. 从机收到正确握手1后排队响应，经过非阻塞周转时间发送；
+3. 主机验证响应后等待3ms保护，再发送握手2；
+4. 从机响应握手2，物理TX完成后进入ONLINE；
+5. 主机收到握手2响应后进入ONLINE；
+6. 写/读命令如果链路有效则执行一次；链路过期则重新握手后执行一次；
+7. 主机每次收到有效响应后，下一次发送前均经过保护；
+8. 从机500ms未收到正确请求后进入COMM_FAULT，并允许重新握手。
+
+外部端到端仿真已经通过：上电握手、写0x0008=0x1234、读取0x0008、
+主机450ms STALE、从机500ms COMM_FAULT、故障后重新握手并执行pending读取。
+
+二、已确认正确的集成点
+----------------------
+
+1. USART6配置
+   - test.ioc: PC6=USART6_TX，PC7=USART6_RX；
+   - Core/Src/usart.c:62-88：38400、8N1、TX_RX、无流控；
+   - Core/Src/usart.c:121-147：GPIOC AF8、AF_PP、NOPULL；
+   - Core/Src/usart.c:141-143：USART6 IRQ优先级11并启用；
+   - Core/Src/stm32f4xx_it.c:251-256：USART6_IRQHandler进入HAL。
+
+2. HAL UART回调只有一套定义
+   - Core/Src/main.c:193-223；
+   - USART1与USART6按Instance分发；
+   - 未发现第二套重复HAL_UART_RxCpltCallback、TxCpltCallback或ErrorCallback。
+
+3. 初始化和主循环顺序
+   - Core/Src/main.c:99-112：USART6初始化后，先初始化UART传输层，再初始化角色状态机；
+   - Core/Src/main.c:133-136：先AppOneWireUart_Process，再AppOneWire_Process，再LED处理。
+
+4. 帧协议
+   - Core/Src/app_onewire_protocol.c；
+   - 0xAA帧头、S/D/L/DATA/XOR实现正确；
+   - 已验证握手帧、写帧和读响应帧的已知字节；
+   - 长度上限和XOR错误路径存在。
+
+5. USART6异步TX缓冲生命周期
+   - Core/Src/app_onewire_uart.c:23：模块私有静态tx_storage；
+   - 行130-140：调用者数据先复制，再传给HAL_UART_Transmit_IT；
+   - 不存在把从机栈局部响应数组直接交给HAL异步发送的问题。
+
+6. 回显窗口
+   - Core/Src/app_onewire_uart.c:194-201：仅tx_active期间丢弃RX；
+   - 行209-213：只有TxCpltCallback正常清除tx_active；
+   - 未发现TC后5ms回显窗口；
+   - tx_active赋值位置仅为初始化、发送开始、发送启动失败和TX完成。
+
+7. 主机换向保护
+   - Core/Src/app_onewire_master.c:101-112：保护基于最近有效响应时刻；
+   - 行599-615：握手1→握手2以及握手2→pending操作均受保护；
+   - 行672-681：在线读写和强制握手也进入保护/握手入口；
+   - 不再存在握手2响应后立即发送读写的名义路径。
+
+8. 主机结果状态
+   - Submit时设置PENDING：Core/Src/app_onewire_master.c:661-670；
+   - 读写成功设置SUCCESS：行114-123、326-383；
+   - 链路450ms老化只更新link_state，不覆盖最近事务结果：行617-623；
+   - pending字段与last结果字段已经分离。
+
+9. 从机响应队列
+   - Core/Src/app_onewire_slave.c:81-115：固定响应缓冲和pending；
+   - 行150-176：周转时间到期且UART空闲后发送，成功后才清pending；
+   - 行133-148：物理TX完成后才执行握手状态推进。
+
+10. W2对象0x08
+    - Core/Src/app_uart.c:141-197、344-346、479-481；
+    - A1输出16字节快照；
+    - A2支持0x01重握手、0x03写、0x06读；
+    - 写/读地址和值按W2小端解析；
+    - A2 OK仅表示提交成功。
+
+11. PE8仲裁
+    - Core/Src/app_led.c；
+    - 手动模式优先；
+    - 主机自动1000ms闪烁；
+    - 从机ONLINE为500ms，STALE为200ms，等待握手时灭；
+    - PE8低有效实现正确。
+
+12. 构建脚本结构
+    - build.ps1要求-Role master/slave；
+    - 主从使用独立build_master/build_slave目录；
+    - 新增单总线和LED源文件均已列入$C_FILES；
+    - 当前40个源文件的目标文件basename无重名。
+
+三、审计发现的问题与风险
+------------------------
+
+P1-1：从机没有TX完成超时和UART错误业务恢复，TX异常可永久卡死
+
+直接证据：
+- Core/Src/app_onewire_slave.c:133-148：response_in_flight只能由TakeTxDone清除；
+- 行373-378：response_pending或response_in_flight时，所有状态超时直接停止检查；
+- 从机没有读取AppOneWireUartStats.uart_error_count；
+- 从机没有TX watchdog。
+
+触发后果：
+- 如果HAL_UART_TxCpltCallback因异常没有到达，response_in_flight永久为true；
+- 握手状态无法推进；
+- 500ms握手/通信故障超时也被永久抑制；
+- 后续所有请求在process_frame行319-323被丢弃；
+- 从机只能通过复位恢复。
+
+结论：已证明的状态机恢复缺口。名义通信不触发，但硬件异常时影响严重。
+
+P1-2：主机TX超时只改变业务状态，没有终止或复位底层TX
+
+直接证据：
+- Core/Src/app_onewire_master.c:490-501：TX超时调用fail_handshake/fail_uart；
+- Core/Src/app_onewire_uart.c中没有AbortTx/RecoverTx接口；
+- AppOneWireUart_Send行125-127仍会因tx_active或HAL gState不READY拒绝后续发送。
+
+触发后果：
+- A1可能显示busy=0、事务已失败；
+- 但底层tx_active/gState仍可能保持busy；
+- 下一次命令虽然被Submit接受，实际发送又失败；
+- 若HAL永远不恢复，主机同样需要复位。
+
+结论：已证明的上下层状态不一致风险，需要与P1-1一起处理。
+
+P2-1：5ms帧内超时使用“主循环处理时间”，不是实际字节到达时间
+
+直接证据：
+- UART环形缓冲只保存byte，不保存arrival tick；
+- Core/Src/app_onewire_master.c:413-435与slave.c:347-370在一次process_rx中，
+  给所有积压字节传入同一个now_tick；
+- AppOneWireParser的last_byte_tick因此不能识别积压期间真实发生的长字节间隔。
+
+触发场景：
+- USART1阻塞响应或主循环被其他任务延迟；
+- USART6先收到半帧，间隔超过5ms后又收到剩余字节；
+- 两部分都在主循环恢复前进入环形缓冲；
+- parser可能把它们当作连续帧处理。
+
+影响：XOR、地址和内容校验能降低误接受概率，但帧内超时语义并未严格实现。
+
+P2-2：从机UART错误不会映射为UART_ERROR链路状态
+
+直接证据：
+- AppOneWireUart_ErrorCallback只记录和rearm；
+- app_onewire.c的slave_link_state只根据SlaveState映射；
+- slave状态机不观察uart_error_count。
+
+影响：
+- 从机A1可能仍显示ONLINE；
+- LED的UART_ERROR快速闪烁分支在从机侧实际上不可达；
+- 通常会在500ms无有效请求后才转STALE。
+
+P2-3：Makefile和MDK-ARM工程没有同步新增模块与角色宏
+
+当前明确支持的构建入口只有build.ps1。
+如果改用旧Makefile或Keil工程：
+- 可能缺少app_onewire_*和app_led源文件；
+- 可能没有APP_ONEWIRE_ROLE宏；
+- app_onewire_config.h会直接#error。
+
+如果项目继续只使用VSCode + build.ps1，此项不阻塞。
+
+P3-1：2U SysTick周转配置不代表物理时间严格不少于2.000ms
+
+从机使用：
+  (now - response_queued_tick) >= 2
+
+由于HAL_GetTick为1ms粒度，实际等待通常约1～2ms。
+对TC中断换向通常已经足够，但报告中不能称为“物理至少2ms”。
+如硬性要求最低2ms，应改为3个tick或使用更高分辨率计时。
+
+P3-2：握手500ms边界由处理顺序决定
+
+主机先解析响应、后检查总超时。如果完整响应在tick边界500被处理，状态先离开握手，
+随后总超时检查不会失败。1ms粒度下属于边界定义问题，不影响正常路径。
+
+P3-3：上电只自动握手一次，没有启动延迟或自动重试
+
+这是此前冻结的产品行为，不是代码偏差。但两板上电时序差较大时，主机第一次握手可能早于从机完成初始化。
+此时需通过对象0x08重新握手。硬件测试应包含“主从不同步上电”场景。
+
+四、测试覆盖结果
+----------------
+
+严格主机编译参数：
+-std=c11 -Wall -Wextra -Werror -pedantic -O0 -g
+
+通过：
+1. app_onewire_protocol tests passed
+2. app_onewire_uart tests passed
+3. app_onewire_slave tests passed
+4. app_onewire_master tests passed
+5. app_onewire role dispatch tests passed（master）
+6. app_onewire role dispatch tests passed（slave）
+7. app_led arbitration tests passed
+8. app_uart one-wire object tests passed（master）
+9. app_uart one-wire object tests passed（slave）
+10. 外部端到端主从状态机仿真通过
+
+现有测试缺口：
+- 从机TX完成回调永久缺失；
+- 主机TX超时后底层仍busy；
+- 从机UART error业务状态；
+- 带实际到达时间的分段帧；
+- STM32F407真实HAL中断时序；
+- ARM编译、链接和硬件波形。
+
+五、总体结论
+------------
+
+1. 未发现会让“正常名义时序下每次握手必然失败”的确定性P0缺陷。
+2. 当前主从状态机、帧协议、换向保护、结果状态和对象0x08在主机测试及端到端仿真中闭环通过。
+3. 仍有两个P1恢复缺口：
+   - 从机TX异常可永久卡死；
+   - 主机TX超时后业务状态与底层UART可能不一致。
+4. 在真实构建和下载前，建议先完成一轮仅针对P1-1/P1-2的最小恢复修复。
+5. P2字节时间戳问题可与恢复修复分开处理，避免一次修改范围过大。
+6. 最终仍必须执行master/slave真实ARM构建，不能以主机GCC测试代替。
+
+六、建议后续步骤
+----------------
+
+第13步只处理TX异常恢复，不增加新功能：
+- 为USART6传输层增加明确的TX abort/recover接口；
+- 主机TX watchdog触发时先安全终止HAL TX，再结束业务事务；
+- 从机记录response_tx_start_tick并增加TX watchdog；
+- 从机观察UART错误计数，清理pending/in_flight并进入可重新握手状态；
+- 增加对应异常测试；
+- 不改协议、不改W2对象、不改正常时序参数。
+
+第14步再单独处理帧字节到达时间语义或决定接受当前约束。

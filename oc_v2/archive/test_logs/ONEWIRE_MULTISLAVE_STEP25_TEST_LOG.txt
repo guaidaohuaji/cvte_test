@@ -1,0 +1,143 @@
+Step25 one-wire multi-slave on-demand full host regression
+UTC: 2026-07-28T14:29:35Z
+Host compiler: gcc (Debian 14.2.0-19) 14.2.0
+
+===== RUN Tests/run_onewire_multislave_host_test.sh =====
+app_onewire_master multi-slave on-demand tests passed
+app_onewire_slave addressed multi-drop tests passed
+app_onewire role dispatch tests passed
+app_onewire role dispatch tests passed
+app_uart one-wire object tests passed
+app_onewire_master multi-slave on-demand tests passed
+app_onewire_slave addressed multi-drop tests passed
+one-wire multi-slave on-demand step-25 host verification passed
+===== PASS Tests/run_onewire_multislave_host_test.sh =====
+
+===== RUN Tests/run_damper_boot_homing_host_test.sh =====
+damper boot-open homing step-24 tests passed
+damper boot-open homing step-24 tests passed
+damper boot-open homing step-24 host verification passed
+===== PASS Tests/run_damper_boot_homing_host_test.sh =====
+
+===== RUN Tests/run_pwm_output_p1_host_test.sh =====
+general PWM output phase-P1 tests passed
+general PWM output phase-P1 tests passed
+app_uart fan control and health protocol tests passed
+general PWM output step-21 phase-P1 host verification passed
+===== PASS Tests/run_pwm_output_p1_host_test.sh =====
+
+===== RUN Tests/run_pwm_input_p2_host_test.sh =====
+general PWM input phase-P2 tests passed
+general PWM input phase-P2 tests passed
+general PWM input step-22 phase-P2 host verification passed
+===== PASS Tests/run_pwm_input_p2_host_test.sh =====
+
+===== RUN Tests/run_pwm_input_p3_host_test.sh =====
+general PWM input DMA autorange phase-P3 tests passed
+general PWM input DMA autorange phase-P3 tests passed
+general PWM input phase-P2 tests passed
+general PWM input step-23 phase-P3 host verification passed
+===== PASS Tests/run_pwm_input_p3_host_test.sh =====
+
+===== RUN Tests/run_fan_bpf_host_test.sh =====
+DC RMS: 0.024994
+Gain 10 Hz: 0.174531
+Gain 33.33 Hz: 0.994117
+Gain 50 Hz: 0.999713
+Gain 76.67 Hz: 0.928682
+Gain 150 Hz: 0.323905
+50 Hz + 1 kHz composite RMS: 353.439972
+33.33 Hz + 1 Hz baseline drift RMS: 563.291321
+Tach 33.33 Hz: valid=1 f=33334 mHz rpm=1000 period=300 hyst=118.803
+Tach 76.67 Hz: valid=1 f=76666 mHz rpm=2300 period=130
+Tach 50 Hz + drift + 1 kHz: valid=1 f=50000 mHz rpm=1500
+Tach amplitude changes: valid=1 f=33333 mHz rpm=1000 rejects=0
+Tach step 33->60 Hz: valid=1 f=60000 mHz resync=1 inconsistent=2
+Tach 20 Hz rejection: valid=0 long=26
+Tach 100 Hz rejection: valid=0 short=133
+Tach timeout after signal loss: valid=0 timeout=1 rms=0.042
+fan BPF and filtered tach host tests passed
+fan feedback reset semantics tests passed
+fan feedback source arbitration tests passed
+fan feedback full-chain integration tests passed
+fan feedback source arbitration tests passed
+fan feedback source arbitration tests passed
+fan BPF stage-3 host verification passed
+===== PASS Tests/run_fan_bpf_host_test.sh =====
+
+===== RUN Tests/run_fan_auto_host_test.sh =====
+auto fan profile tests passed
+fan startup and safety-lock tests passed
+auto fan closed-loop and safety-lock tests passed
+fan auto step-15 host verification passed
+===== PASS Tests/run_fan_auto_host_test.sh =====
+
+===== RUN Tests/run_manual_fan_phase1_host_test.sh =====
+manual fan RPM controller phase-1 tests passed
+manual fan RPM controller phase-1 host verification passed
+===== PASS Tests/run_manual_fan_phase1_host_test.sh =====
+
+===== RUN Tests/run_manual_fan_phase2_host_test.sh =====
+app_uart fan control and health protocol tests passed
+manual fan RPM controller phase-1 tests passed
+manual fan RPM controller phase-1 host verification passed
+auto fan profile tests passed
+fan startup and safety-lock tests passed
+auto fan closed-loop and safety-lock tests passed
+fan auto step-15 host verification passed
+DC RMS: 0.024994
+Gain 10 Hz: 0.174531
+Gain 33.33 Hz: 0.994117
+Gain 50 Hz: 0.999713
+Gain 76.67 Hz: 0.928682
+Gain 150 Hz: 0.323905
+50 Hz + 1 kHz composite RMS: 353.439972
+33.33 Hz + 1 Hz baseline drift RMS: 563.291321
+Tach 33.33 Hz: valid=1 f=33334 mHz rpm=1000 period=300 hyst=118.803
+Tach 76.67 Hz: valid=1 f=76666 mHz rpm=2300 period=130
+Tach 50 Hz + drift + 1 kHz: valid=1 f=50000 mHz rpm=1500
+Tach amplitude changes: valid=1 f=33333 mHz rpm=1000 rejects=0
+Tach step 33->60 Hz: valid=1 f=60000 mHz resync=1 inconsistent=2
+Tach 20 Hz rejection: valid=0 long=26
+Tach 100 Hz rejection: valid=0 short=133
+Tach timeout after signal loss: valid=0 timeout=1 rms=0.042
+fan BPF and filtered tach host tests passed
+fan feedback reset semantics tests passed
+fan feedback source arbitration tests passed
+fan feedback full-chain integration tests passed
+fan feedback source arbitration tests passed
+fan feedback source arbitration tests passed
+fan BPF stage-3 host verification passed
+manual fan RPM controller phase-2 host verification passed
+===== PASS Tests/run_manual_fan_phase2_host_test.sh =====
+
+===== RUN Tests/run_fan_health_phase2_host_test.sh =====
+auto fan profile tests passed
+fan startup and safety-lock tests passed
+fan startup and safety-lock tests passed
+fan health formal shutdown phase-2 tests passed
+fan health formal shutdown phase-2 tests passed
+fan health step-19 phase-2 host verification passed
+===== PASS Tests/run_fan_health_phase2_host_test.sh =====
+
+===== RUN Tests/run_fan_health_phase3_host_test.sh =====
+auto fan profile tests passed
+fan startup and safety-lock tests passed
+fan startup and safety-lock tests passed
+fan health formal shutdown phase-2 tests passed
+fan health formal shutdown phase-2 tests passed
+fan health step-19 phase-2 host verification passed
+app_uart fan control and health protocol tests passed
+app_uart fan control and health protocol tests passed
+fan health step-20 phase-3 W2 verification passed
+===== PASS Tests/run_fan_health_phase3_host_test.sh =====
+
+===== LOW-LEVEL ONEWIRE PROTOCOL =====
+app_onewire_protocol tests passed
+===== PASS LOW-LEVEL ONEWIRE PROTOCOL =====
+
+===== LOW-LEVEL ONEWIRE UART =====
+app_onewire_uart tests passed
+===== PASS LOW-LEVEL ONEWIRE UART =====
+
+ALL STEP25 HOST REGRESSIONS PASSED

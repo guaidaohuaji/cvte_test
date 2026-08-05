@@ -1,0 +1,7 @@
+=== app_uart + fan health W2 ASan/UBSan ===
+app_uart fan control and health protocol tests passed
+
+=== app_fan_health ASan/UBSan ===
+fan health formal shutdown phase-2 tests passed
+
+ASan/UBSan completed without diagnostics.

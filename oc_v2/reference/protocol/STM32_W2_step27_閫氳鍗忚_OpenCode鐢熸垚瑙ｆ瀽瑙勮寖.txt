@@ -1,0 +1,901 @@
+STM32 W2 通讯协议：OpenCode生成与解析规范
+
+规范标识
+========
+协议实现基线：cvte_test-step25-onewire-multislave / Core/Src/app_uart.c
+参考上位机：STM32_W2_Host_v0.1.8（仅兼容默认从机0x02）；多从机UI将在后续版本增加
+适用链路：USART1，9600 baud，8 data bits，no parity，1 stop bit（8N1）
+编码：纯二进制字节流；HEX文本仅用于人工展示；线上不发送空格、冒号、CR或LF。
+
+本文关键词
+==========
+MUST：必须遵守，否则无法可靠互通。
+SHOULD：推荐遵守，用于兼容和稳健解析。
+LE16/LE32：小端无符号整数。
+i16/i32 LE：二进制补码小端有符号整数。
+duty_x100：百分比乘100，例如30.00%=3000=0x0BB8。
+frequency_millihz：Hz乘1000，例如50.000 Hz=50000。
+temp_centi_c：摄氏度乘100，例如25.34°C=2534。
+
+一、物理层和时序
+================
+
+1. USART1固定9600 8N1。
+2. 固件逐字节中断接收，环形缓冲区128字节。
+3. 固件帧内字节间超时约50 ms；一帧开始后，相邻字节SHOULD连续发送，不要人为插入长延迟。
+4. 上位机当前单请求等待响应超时约0.8 s。
+5. W2没有转义机制。DATA或CHECKSUM中出现0x7E是合法的；解析器在确认LENGTH后必须按长度取完整帧，不能把帧内0x7E误当新帧头。
+6. 同一时刻SHOULD只保持一个待响应请求，收到响应或超时后再发下一帧。
+
+二、统一帧格式
+==============
+
+线上字节：
+
+  7E | TYPE | LENGTH | DATA[0..N-1] | CHECKSUM
+
+字段定义：
+- HEADER固定0x7E。
+- TYPE：0xA1=查询；0xA2=控制。
+- DATA长度N范围0～32。
+- LENGTH=N+2。
+- 完整帧总字节数=LENGTH+2=N+4。
+- CHECKSUM=(TYPE + LENGTH + DATA所有字节之和) & 0xFF。
+- HEADER 0x7E不参加CHECKSUM。
+- FRAME_MAX_DATA=32，因此LENGTH合法范围0x02～0x22。
+
+构帧伪代码：
+
+  function build_frame(type, data_bytes):
+      assert type in [0xA1, 0xA2]
+      assert 0 <= len(data_bytes) <= 32
+      length = len(data_bytes) + 2
+      checksum = (type + length + sum(data_bytes)) & 0xFF
+      return [0x7E, type, length] + data_bytes + [checksum]
+
+示例：查询对象0x09
+- DATA=09，N=1，LENGTH=03。
+- CHECKSUM=(A1+03+09)&FF=AD。
+- 完整帧：7E A1 03 09 AD。
+
+三、流式解析算法
+================
+
+推荐解析器状态/步骤：
+
+1. 在缓冲区中搜索第一个0x7E；丢弃其之前所有噪声。
+2. 至少等待3字节，读取TYPE和LENGTH。
+3. 验证2 <= LENGTH <= 34；非法则丢弃当前这个0x7E，再次搜索帧头。
+4. total=LENGTH+2；缓冲区不足total字节时继续等待。
+5. candidate=从0x7E开始的total字节。
+6. data_len=LENGTH-2；DATA=candidate[3 : 3+data_len]。
+7. expected=(TYPE+LENGTH+sum(DATA))&0xFF。
+8. 若末字节不等于expected，丢弃当前帧头一个字节后重新同步；不要盲目清空所有后续数据。
+9. 校验通过后输出一帧，并从缓冲区删除total字节。
+
+注意：
+- 当前固件遇到非法LENGTH、帧内超时或CHECKSUM不匹配时通常静默丢帧，不保证返回错误响应。
+- STATUS_CHECKSUM_ERROR和STATUS_UNSUPPORTED_TYPE虽有定义，但当前dispatch路径对坏校验/未知TYPE通常不发响应。调用方必须依赖超时处理。
+
+四、请求与响应通用约定
+======================
+
+A1查询请求
+----------
+普通请求DATA：
+
+  [object_id]
+
+对象0x06版本化查询例外：
+
+  [0x06, 0x01]  扩展控制状态V1
+  [0x06, 0x02]  风机健康诊断V2
+
+A1成功响应
+----------
+TYPE仍为0xA1，DATA一般为：
+
+  [status=0x00, object_id, object_payload...]
+
+A1错误响应
+----------
+TYPE=0xA1，DATA严格2字节：
+
+  [status!=0x00, object_id]
+
+A2控制请求
+----------
+TYPE=0xA2，DATA以object_id开头，后续布局由对象定义。
+
+A2响应/ACK
+----------
+TYPE=0xA2，DATA严格2字节：
+
+  [status, object_id]
+
+例如对象0x06成功：
+
+  7E A2 04 00 06 AC
+
+重要语义：A2 status=OK通常表示命令被接受或同步应用成功，不一定表示异步动作已经完成。风门运动和单总线读写必须继续用A1查询最终状态。
+
+五、通用状态码
+==============
+
+0x00 OK                  成功
+0x01 LENGTH_ERROR        DATA长度错误
+0x02 CHECKSUM_ERROR      校验错误；当前线上坏帧通常静默丢弃
+0x03 UNSUPPORTED_TYPE    不支持TYPE；当前未知TYPE通常静默丢弃
+0x04 UNSUPPORTED_OBJECT  不支持对象
+0x05 PARAM_RANGE         参数越界或枚举非法
+0x06 APPLY_FAILED        执行/应用失败
+0x07 READ_ONLY           只读或当前角色不可控制
+0x08 NO_VALID_DATA       缺少有效位置/测量数据
+0x09 BUSY                忙，暂不能接受命令
+0x0A HW_ERROR            硬件或模块错误
+0x0B MODE_LOCKED         全局AUTO锁定了手动风机/风门命令
+
+通用ACK生成：
+
+  ACK(type, status, object) = build_frame(type, [status, object])
+
+六、对象ID总表
+==============
+
+0x01 通用PWM输出
+0x02 LED
+0x03 PWM输入（只读）
+0x04 PD13数字输出
+0x05 NTC温度（只读）
+0x06 风机（旧状态/扩展V1/健康V2；OFF/PWM/目标转速/清故障）
+0x07 风门
+0x08 USART6单总线桥接
+0x09 全局温度自动控制
+
+标准查询帧：
+
+0x01  7E A1 03 01 A5
+0x02  7E A1 03 02 A6
+0x03  7E A1 03 03 A7
+0x04  7E A1 03 04 A8
+0x05  7E A1 03 05 A9
+0x06旧  7E A1 03 06 AA
+0x06扩展V1  7E A1 04 06 01 AC
+0x06健康V2  7E A1 04 06 02 AD
+0x07  7E A1 03 07 AB
+0x08  7E A1 03 08 AC
+0x09  7E A1 03 09 AD
+
+七、对象0x01：通用PWM输出
+==========================
+
+A1成功响应DATA长度：9
+
+偏移  类型   字段
+[0]   u8     status=0
+[1]   u8     object=0x01
+[2]   u8     enabled，0/1
+[3..6] LE32  actual_frequency_hz
+[7..8] LE16  duty_x100
+
+注：禁用时duty_x100返回保存的目标占空比，不一定是硬件输出0%的瞬时CCR值。
+
+A2请求DATA：
+
+  01 | enable_u8 | frequency_hz_LE32 | duty_x100_LE16
+
+约束：
+- enable=1：frequency 1～840000；duty_x100 0～10000，输出按最接近的1%量化。
+- enable=0：frequency和duty必须全部为0。
+- 当前固件严格要求len==8；尾部额外DATA字节返回STATUS_LENGTH_ERROR。
+
+示例：
+- 启用1000 Hz、50.00%：7E A2 0A 01 01 E8 03 00 00 88 13 34
+- 启用100000 Hz、1%：7E A2 0A 01 01 A0 86 01 00 64 00 39
+- 关闭：7E A2 0A 01 00 00 00 00 00 00 00 AD
+- 成功ACK：7E A2 04 00 01 A7
+
+八、对象0x02：LED
+================
+
+A1成功响应DATA长度：4
+
+[0] status
+[1] object=0x02
+[2] mode：0=AUTO，1=MANUAL
+[3] actual_led_on：0=灭，1=亮
+
+A2请求DATA：
+
+  02 | command
+
+command：
+- 0：切到MANUAL并关闭LED。
+- 1：切到MANUAL并点亮LED。
+- 2：切到AUTO模式。
+
+示例：
+- 手动灭：7E A2 04 02 00 A8
+- 手动亮：7E A2 04 02 01 A9
+- 自动：7E A2 04 02 02 AA
+- 成功ACK：7E A2 04 00 02 A8
+
+九、对象0x03：PWM输入
+====================
+
+A1成功响应DATA长度：11
+
+[0] status
+[1] object=0x03
+[2] input_state
+[3..6] frequency_millihz LE32
+[7..8] duty_x100 LE16
+[9..10] age_ms LE16
+
+input_state：
+0 SEARCH
+1 OK
+2 STATIC_HIGH
+3 STATIC_LOW
+4 OUT_OF_RANGE
+5 UNSTABLE
+6 HW_ERROR
+
+当input_state不是OK时，当前固件把frequency_millihz和duty_x100编码为0。
+
+Step23测量配置：
+- 默认引擎：TIM1 PWM Input reset mode + DMA2 Stream6 Channel0；
+- 自动量程计数时钟：21 MHz / 1 MHz / 50 kHz；
+- 软件有效频率范围：1 Hz～200 kHz；
+- 输入数字滤波：ICFilter=2；
+- DMA循环缓冲：128组period/ext_high；
+- 最近5个有效周期按period取中位样本；
+- 静态电平判定超时：2500 ms；
+- 对象0x03占空比和极性语义保持不变；
+- 旧Step22双边沿中断引擎可通过编译宏回退。
+
+200 kHz、1%接近一个计数，协议允许返回量化后的实际测量值；硬件可识别性必须以实测为准。
+
+A2：只读，返回STATUS_READ_ONLY。
+
+十、对象0x04：PD13数字输出
+==========================
+
+A1成功响应DATA长度：3
+
+[0] status
+[1] object=0x04
+[2] PD13 ODR level：0=低，1=高
+
+A2请求DATA：
+
+  04 | level
+
+level只能为0或1。
+
+示例：
+- 低：7E A2 04 04 00 AA
+- 高：7E A2 04 04 01 AB
+- 成功ACK：7E A2 04 00 04 AA
+
+十一、对象0x05：NTC温度
+=======================
+
+A1成功响应DATA长度：15
+
+[0] status
+[1] object=0x05
+[2] ntc_state
+[3..4] adc_raw LE16
+[5..6] voltage_mv LE16
+[7..10] resistance_ohm LE32
+[11..12] temperature_centi_c i16 LE
+[13..14] age_ms LE16
+
+ntc_state：
+0 SEARCH/WAIT
+1 OK
+2 ADC_ERROR
+3 OPEN_OR_UNDER_TEMP
+4 SHORT_OR_OVER_TEMP
+5 CALC_ERROR
+6 CONFIG_ERROR
+
+温度解码：temperature_C=temperature_centi_c/100.0。
+NTC换算使用 LTR LNTD5.06(05)GW 数据表的 Rcent 列，测量有效范围为 -40.00~120.00°C；范围外分别钳位到端点。
+AUTO控制范围仍由对象0x09内部配置独立限制为 -25.00~60.00°C，本次未改变。
+A2：只读，返回STATUS_READ_ONLY。
+
+十二、对象0x06：风机
+====================
+
+A. A2控制
+----------
+
+统一DATA布局：
+
+  06 | mode | value_LE16
+
+mode=0 OFF
+- value必须为0。
+- 示例：7E A2 06 06 00 00 00 AE
+
+mode=1 DUTY
+- value=duty_x100。
+- value=0为历史特殊语义：fan enabled=true但输出0，模块状态为OFF。
+- 非零范围1000～10000，即10.00%～100.00%。
+- 30.00%示例：7E A2 06 06 01 B8 0B 72
+
+mode=2 SPEED
+- value=target_rpm。
+- 范围1000～2300 RPM。
+- 1500 RPM示例：7E A2 06 06 02 DC 05 91
+
+mode=3 CLEAR_FAULT
+- value必须为0。
+- DATA长度必须严格等于4，不接受尾部字节。
+- MANUAL和AUTO模式下均允许执行。
+- 清除后风机仍保持0%，restart_inhibited仍为1。
+- 之后必须发送新的DUTY/SPEED命令，或重新发送AUTO模式命令，才授权重启。
+- 无故障时清除为幂等OK。
+- 示例：7E A2 06 06 03 00 00 B1
+
+通用成功ACK：7E A2 04 00 06 AC
+AUTO锁定ACK：7E A2 04 0B 06 B7
+
+兼容性：
+- mode=0/1与旧协议的enable=0/1字节值兼容。
+- OFF/DUTY/SPEED当前固件len>=4即接受，可能忽略尾部额外DATA；生成器SHOULD只发4字节DATA。
+- CLEAR_FAULT严格要求len==4。
+- 全局AUTO时，OFF/DUTY/SPEED优先返回MODE_LOCKED；CLEAR_FAULT在AUTO下允许。
+
+B. 旧A1查询
+------------
+
+请求：DATA=[06]，帧7E A1 03 06 AA。
+成功响应DATA长度：18。
+
+[0] status
+[1] object=0x06
+[2] fan_state
+[3] enabled
+[4..5] target_duty_x100 LE16
+[6..7] applied_duty_x100 LE16
+[8..9] pwm_frequency_hz LE16
+[10..13] fg_frequency_millihz LE32
+[14..15] rpm LE16
+[16..17] tach_age_ms LE16
+
+fan_state：
+0 OFF
+1 STARTUP_BOOST
+2 RUNNING
+3 NO_TACH
+4 TACH_UNRELIABLE
+5 PWM_ERROR
+6 CONFIG_ERROR
+7 SAFETY_LOCKED
+
+C. 扩展A1查询V1
+----------------
+
+请求DATA=[06,01]，帧7E A1 04 06 01 AC。
+成功响应DATA长度：32。
+
+[0] status=0
+[1] object=0x06
+[2] schema_version=1
+[3] manual_control_mode
+    0 OFF
+    1 DUTY
+    2 SPEED
+[4] manual_control_state
+    0 INACTIVE
+    1 STARTING
+    2 WAIT_TACH
+    3 ADJUSTING
+    4 IN_TOLERANCE
+    5 TACH_FAULT
+    6 SATURATED_LOW
+    7 SATURATED_HIGH
+    8 HW_ERROR
+    9 SAFETY_LOCKED
+[5] flags
+    bit0 fan_enabled
+    bit1 fan_tach_valid（风机底层测速有效）
+    bit2 manual_tach_valid（手动转速控制器看到的测速有效）
+    bit3 manual_in_tolerance
+    bit4 global_auto_active
+    bit5 startup_boost_active
+    bit6 tach_fault_active
+    bit7 hardware_config_or_safety_fault
+[6..7] target_rpm LE16
+[8..9] rpm_error i16 LE，固件瞬时定义target_rpm-actual_rpm
+[10..11] feedforward_duty_x100 LE16
+[12..13] fan_target_duty_x100 LE16
+[14..15] fan_applied_duty_x100 LE16
+[16..17] pwm_frequency_hz LE16
+[18..21] fg_frequency_millihz LE32
+[22..23] actual_rpm LE16
+[24..25] tach_age_ms LE16
+[26..27] adjust_count LE16，内部u32饱和到65535
+[28..29] fault_count LE16，内部u32饱和到65535
+[30] global_auto_mode：0 MANUAL，1 AUTO
+[31] reserved=0
+
+版本识别规则：
+- 响应DATA长度18：旧快照。
+- 响应DATA长度32：先验证data[2]==1，再按扩展V1解析。
+- 其他长度：拒绝解析。
+- 历史旧固件可能忽略查询中的尾部01并仍返回18字节，调用方MUST按响应长度自动兼容。
+
+显示层注意：v0.1.6上位机不直接显示协议rpm_error；它用平滑后的实际RPM重新计算显示误差。协议解析器仍MUST正确解析i16字段。
+
+D. 风机健康诊断A1查询V2
+------------------------
+
+请求DATA=[06,02]，帧7E A1 04 06 02 AD。
+成功响应DATA长度：32。
+
+[0] status=0
+[1] object=0x06
+[2] schema_version=2
+[3] health_state
+    0 DISABLED
+    1 STARTUP_BOOST
+    2 SETTLING
+    3 NORMAL
+    4 SPEED_SUSPECT
+    5 TACH_SUSPECT
+    6 SPEED_FAULT_LATCHED
+    7 TACH_FAULT_LATCHED
+[4] fault_type
+    0 NONE
+    1 SPEED_LOW
+    2 SPEED_HIGH
+    3 TACH_LOST
+[5] flags
+    bit0 fault_latched
+    bit1 monitoring_active
+    bit2 tach_valid
+    bit3 shutdown_succeeded
+    bit4 restart_inhibited
+    bit5 fan_enabled
+    bit6 fan_state_is_safety_locked
+    bit7 reserved
+[6..7] applied_duty_x100 LE16
+[8..9] reference_duty_x100 LE16
+[10..11] expected_rpm LE16
+[12..13] actual_rpm LE16
+[14..15] deviation_rpm i16 LE，定义为actual_rpm-expected_rpm
+[16..17] absolute_deviation_rpm LE16
+[18..19] maximum_absolute_deviation_rpm LE16
+[20..21] fault_applied_duty_x100 LE16
+[22..23] fault_expected_rpm LE16
+[24..25] fault_actual_rpm LE16
+[26..27] fault_deviation_rpm i16 LE
+[28..29] abnormal_elapsed_ms LE16，内部u32饱和到65535
+[30..31] settling_remaining_ms LE16，内部u32饱和到65535
+
+版本识别规则：
+- 发送[06,02]后，响应DATA长度32且data[2]==2时按健康V2解析。
+- 旧固件可能忽略选择器02并返回18字节旧快照，调用方MUST按长度与schema双重识别。
+- 不得仅凭“32字节”判断V2，因为扩展V1也是32字节；必须检查data[2]。
+
+故障安全语义：
+- fault_latched=1表示故障已锁存。
+- shutdown_succeeded=1表示固件已确认风机关闭到0%。
+- restart_inhibited=1表示即使故障已清除，仍不允许自动恢复历史输出。
+- 清故障命令只清锁存，不等价于重新启动。
+
+十三、对象0x07：风门
+=====================
+
+角度换算：
+
+  steps = round(1700 - angle_deg * 1700 / 90)
+  angle_deg = (1700 - steps) * 90 / 1700
+
+90°=0步=全开；0°=1700步=全关。
+
+Step24上电行为：
+- Master构建在AppDamper_Init后立即沿打开方向无条件运行1700步。
+- 当前实物定义正向=关闭，因此上电校准使用反向相序。
+- 运行期间position_valid=0、damper_state=0x08、flags.bit5=1。
+- 1700步完成后current_steps和target_steps均建立为0，position_valid=1；保持100ms后释放。
+- 校准期间普通绝对、相对和设置当前位置命令返回BUSY。
+- STOP/RELEASE/紧急停机可中止；若未完成，位置仍无效。
+
+A. A1成功响应
+--------------
+
+DATA长度：23。
+
+[0] status
+[1] object=0x07
+[2] damper_state
+    0x00 UNINITIALIZED
+    0x01 POSITION_UNKNOWN
+    0x02 MOVING_FORWARD（当前硬件定义：正向=关闭）
+    0x03 MOVING_REVERSE（打开）
+    0x04 IDLE_RELEASED
+    0x05 POST_MOVE_HOLD
+    0x06 STOPPED
+    0x07 FAULT
+    0x08 BOOT_HOMING（上电沿打开方向强制运行1700步）
+    0xFE UNAVAILABLE（例如Slave构建）
+[3] flags
+    bit0 position_valid
+    bit1 moving
+    bit2 moving_forward（仅moving时有意义）
+    bit3 released
+    bit4 current build在Master且position_valid时置位，作为位置估计/参考可用附加标志
+    bit5 boot_homing_active
+    bit6..7 reserved
+[4..7] current_steps i32 LE
+[8..11] target_steps i32 LE
+[12..15] remaining_steps LE32
+[16..17] full_travel_steps LE16，当前构建1700
+[18..19] configured_pps LE16，当前构建300
+[20] last_command
+    0 NONE
+    1 MOVE_ABSOLUTE
+    2 MOVE_RELATIVE
+    3 BOOT_HOMING（固件内部上电动作，不是A2子命令）
+[21] last_result
+    0 SUCCESS
+    1 ABORTED_BY_STOP
+    2 ABORTED_BY_RELEASE
+    3 ABORTED_BY_EMERGENCY
+    4 HARDWARE_ERROR
+    5 IN_PROGRESS
+[22] fault_flags
+    bit0 emergency_shutdown
+    bit1 internal_range
+
+B. A2控制
+----------
+
+1) MOVE_ABSOLUTE
+DATA：07 01 target_i32_LE
+DATA长度必须=6。
+目标正常范围0～1700，且需要位置有效。
+示例500步：7E A2 08 07 01 F4 01 00 00 A7
+示例1700步：7E A2 08 07 01 A4 06 00 00 5C
+
+2) MOVE_RELATIVE
+DATA：07 02 delta_i32_LE
+DATA长度必须=6。
+示例+20：7E A2 08 07 02 14 00 00 00 C7
+示例-20：7E A2 08 07 02 EC FF FF FF 9C
+
+3) STOP
+DATA：07 03，帧7E A2 04 07 03 B0。
+
+4) RELEASE
+DATA：07 04，帧7E A2 04 07 04 B1。
+
+5) SET_CURRENT_POSITION
+DATA：07 05 position_i32_LE，DATA长度必须=6，正常范围0～1700。
+不驱动电机，只重新定义当前位置参考。
+示例500步：7E A2 08 07 05 F4 01 00 00 AB
+
+ACK示例：
+- SUCCESS：7E A2 04 00 07 AD
+- LENGTH_ERROR：7E A2 04 01 07 AE
+- PARAM_RANGE：7E A2 04 05 07 B2
+- READ_ONLY：7E A2 04 07 07 B4
+- NO_VALID_DATA：7E A2 04 08 07 B5
+- BUSY：7E A2 04 09 07 B6
+- HW_ERROR：7E A2 04 0A 07 B7
+- MODE_LOCKED：按统一公式为7E A2 04 0B 07 B8
+
+A2 OK仅表示命令被接受；运动完成、被中止或失败必须看后续A1的state/last_result。
+
+十四、对象0x08：单总线多从机桥接
+================================
+
+设计原则
+--------
+
+1. 主机地址固定0x01，从机地址范围0x02～0xFE，0x00、0x01、0xFF非法。
+2. 一次物理总线事务只能访问一个目标从机；忙时提交其他从机命令返回BUSY。
+3. 主机上电后不自动握手、不扫描、不轮询、不保活。
+4. 用户提交READ/WRITE时，主机检查该目标从机的独立上下文：
+   - 最近有效响应年龄<450 ms且状态ONLINE：直接执行读写；
+   - 否则：先对该目标完成两次握手，再自动继续原读写。
+5. 从机仍保持原500 ms规则。超过500 ms未收到发给本机的正确帧即进入COMM_FAULT；
+   发给其他从机的帧必须静默忽略，不能应答，也不能刷新本机500 ms计时。
+6. 第一版主机最多保存8个从机上下文；默认0x02上下文在上电时预创建，其余按首次提交创建。
+7. A1状态查询只读主机内存，不会在USART6单总线上产生任何帧。
+
+A. A1查询
+----------
+
+旧格式（兼容）：
+
+  DATA：08
+
+Master角色下默认查询从机0x02；Slave角色下查询本机编译地址。
+
+多从机格式：
+
+  DATA：08 | slave_address
+
+示例查询从机0x03：
+
+  7E A1 04 08 03 B0
+
+slave_address必须为0x02～0xFE。查询未知但合法的地址返回STATUS_OK，
+context_valid=0，且不会分配上下文或触发握手。
+
+A1成功响应DATA长度仍为16：
+
+[0] status
+[1] object=0x08
+[2] role：1 Master，2 Slave
+[3] link_state
+    0 OFFLINE
+    1 HANDSHAKING
+    2 ONLINE
+    3 STALE
+    4 UART_ERROR
+[4] busy：共享物理总线忙标志，0/1
+[5] pending_valid：当前所查询从机是否正是待执行目标，0/1
+[6] last_operation
+    0 NONE
+    1 REHANDSHAKE
+    3 WRITE
+    6 READ
+[7] result_code
+    0x00 SUCCESS
+    0x01 PENDING
+    0x08 RESPONSE_TIMEOUT
+    0x09 RESPONSE_ERROR
+    0x0A HANDSHAKE_FAILED
+    0x0B UART_ERROR
+[8..9] address LE16
+[10..11] value LE16
+[12] slave_address：本响应对应的目标从机地址
+[13] context_valid：主机是否已为该地址建立上下文，0/1
+[14..15] last_response_age_ms LE16
+    - 0xFFFF：从未收到该从机有效响应
+    - 0xFFFE：年龄饱和值
+
+B. A2控制
+----------
+
+旧格式继续兼容，固定访问默认从机0x02：
+
+  DATA长度6：08 | operation | address_LE16 | value_LE16
+
+多从机格式：
+
+  DATA长度7：08 | slave_address | operation | address_LE16 | value_LE16
+
+operation=0x01 REHANDSHAKE
+- address=0，value=0。
+- 目标0x03示例：7E A2 09 08 03 01 00 00 00 00 B7
+
+operation=0x03 WRITE
+- address范围0x0000～0x0100。
+- value范围0x0000～0xFFFF。
+- 向0x03写0x0008=0x1234：7E A2 09 08 03 03 08 00 34 12 07
+
+operation=0x06 READ
+- address范围0x0000～0x0100。
+- value必须0。
+- 从0x03读0x0008：7E A2 09 08 03 06 08 00 00 00 C4
+
+旧0x02示例保持不变：
+- 重新握手：7E A2 08 08 01 00 00 00 00 B3
+- 写0x0008=0x1234：7E A2 08 08 03 08 00 34 12 03
+- 读0x0008：7E A2 08 08 06 08 00 00 00 C0
+
+提交成功ACK仍为：7E A2 04 00 08 AE。
+
+异步完成规则：
+1. ACK OK只表示目标地址和操作被主机状态机接受。
+2. READ/WRITE仅提交一次；是否需要握手由主机MCU内部判断。
+3. 之后用A1的“08 | 同一slave_address”查询对应上下文。
+4. busy=1表示共享总线正在处理事务；pending_valid=1表示事务属于当前查询地址。
+5. 最终以对应上下文的result_code、address和value为准。
+6. 不存在后台保活。即使上位机周期查询A1，也不会刷新从机500 ms计时。
+
+C. 从机固件地址构建
+------------------
+
+Master：
+
+  .\build.ps1 -Role master
+
+Slave 0x02：
+
+  .\build.ps1 -Role slave -SlaveAddress 0x02
+
+Slave 0x03：
+
+  .\build.ps1 -Role slave -SlaveAddress 0x03
+
+不同地址输出到独立目录build_slave_02、build_slave_03，避免固件互相覆盖。
+每个从机只响应destination等于自身APP_ONEWIRE_SLAVE_ADDRESS的帧。
+
+十五、对象0x09：全局自动控制
+============================
+
+A. A2模式控制
+--------------
+
+DATA：
+
+  09 | mode
+
+mode=0 MANUAL：7E A2 04 09 00 AF
+mode=1 AUTO：7E A2 04 09 01 B0
+成功ACK：7E A2 04 00 09 AF
+
+切入AUTO后：
+- 对象0x06手动风机A2返回MODE_LOCKED。
+- 对象0x07手动风门A2返回MODE_LOCKED。
+- 所有A1查询仍允许。
+
+B. A1成功响应
+--------------
+
+DATA长度：28。
+
+[0] status
+[1] object=0x09
+[2] mode：0 MANUAL，1 AUTO
+[3] auto_state
+    0 UNINITIALIZED
+    1 MANUAL
+    2 WAIT_TEMP
+    3 TARGET_READY
+    4 TEMP_FAULT
+    5 CONFIG_ERROR
+    0xFE UNAVAILABLE
+[4] flags
+    bit0 temp_measurement_valid
+    bit1 targets_valid
+    bit2 failsafe_targets
+    bit3 fan_tach_valid
+    bit4 fan_fault
+    bit5 damper_position_valid
+    bit6 damper_fault（当前由damper_control_state==FAULT置位）
+    bit7 damper_auto_owned
+[5] fan_control_state
+    0 INACTIVE
+    1 STARTING
+    2 WAIT_TACH
+    3 ADJUSTING
+    4 IN_TOLERANCE
+    5 TACH_FAULT
+    6 SATURATED_LOW
+    7 SATURATED_HIGH
+    8 HW_ERROR
+    0xFE UNAVAILABLE
+[6] damper_control_state
+    0 INACTIVE
+    1 WAIT_POSITION
+    2 WAIT_IDLE
+    3 IN_DEADBAND
+    4 COMMAND_SUBMITTED
+    5 MOVING
+    6 POST_HOLD
+    7 FAILSAFE_STOPPING
+    8 FAULT
+    9 COMMAND_ERROR
+    0xFE UNAVAILABLE
+[7] ntc_range_status
+    0 IN_RANGE
+    1 CLAMPED_LOW
+    2 CLAMPED_HIGH
+    3 SENSOR_FAULT
+[8..9] control_temperature_centi_c i16 LE
+[10..11] target_fan_rpm LE16
+[12..13] actual_fan_rpm LE16
+[14..15] applied_fan_duty_x100 LE16
+[16..17] target_damper_steps LE16
+[18..19] actual_damper_steps i16 LE
+[20..21] fan_error_rpm i16 LE，定义target-actual
+[22..23] damper_error_steps i16 LE，定义target-actual
+[24..27] update_seq LE32
+
+十六、数值解码规则
+==================
+
+无符号LE16：
+
+  u16 = b0 | (b1 << 8)
+
+有符号i16：
+
+  raw = b0 | (b1 << 8)
+  i16 = raw if raw < 0x8000 else raw - 0x10000
+
+无符号LE32：
+
+  u32 = b0 | (b1<<8) | (b2<<16) | (b3<<24)
+
+有符号i32：
+
+  raw按LE32读取
+  i32 = raw if raw < 0x80000000 else raw - 0x100000000
+
+单位换算：
+- duty_percent=duty_x100/100.0
+- frequency_hz=frequency_millihz/1000.0
+- temperature_C=temp_centi_c/100.0
+- fan RPM关系：当前固件rpm=fg_frequency_hz×30（2个FG脉冲/转）
+
+十七、OpenCode实现要求
+=====================
+
+生成端MUST：
+1. 严格按小端编码多字节字段。
+2. LENGTH使用DATA长度+2，而不是完整帧长度。
+3. CHECKSUM不包含0x7E。
+4. DATA最多32字节。
+5. 发送规范最短长度，不依赖固件“接受尾部字节”的历史兼容行为。
+6. A2发送后校验响应TYPE、DATA长度2、object_id与请求一致。
+7. A1响应先处理status；status非0时只按2字节错误响应解析，不继续解对象payload。
+
+解析端MUST：
+1. 支持任意分片输入和多帧粘包。
+2. 支持帧头重同步和坏校验后继续搜索。
+3. 按LENGTH而非0x7E分隔帧。
+4. 严格检查每个成功对象响应的DATA长度。
+5. 对0x06同时支持18字节旧版和32字节扩展V1。
+6. 正确处理i16/i32负数。
+7. 未知对象、未知schema、未知枚举值不得崩溃；保留原始数值并报告“未知”。
+8. 请求超时后允许继续解析迟到帧，但不得把对象不匹配的响应错误归属给当前请求。
+
+推荐请求匹配键：
+
+  expected_type + expected_object_id
+
+响应object_id位置：
+- A1/A2请求：DATA[0]。
+- A1/A2响应：DATA[1]，因为DATA[0]是status。
+
+十八、快速测试向量
+==================
+
+查询：
+- 0x01：7E A1 03 01 A5
+- 0x06扩展：7E A1 04 06 01 AC
+- 0x09：7E A1 03 09 AD
+
+控制：
+- 通用PWM 1kHz/50%：7E A2 0A 01 01 E8 03 00 00 88 13 34
+- LED自动：7E A2 04 02 02 AA
+- PD13高：7E A2 04 04 01 AB
+- 风机OFF：7E A2 06 06 00 00 00 AE
+- 风机PWM 30%：7E A2 06 06 01 B8 0B 72
+- 风机1500 RPM：7E A2 06 06 02 DC 05 91
+- 风机健康V2查询：7E A1 04 06 02 AD
+- 清除风机健康故障：7E A2 06 06 03 00 00 B1
+- 风门绝对500步：7E A2 08 07 01 F4 01 00 00 A7
+- 风门STOP：7E A2 04 07 03 B0
+- 单总线写0x0008=0x1234：7E A2 08 08 03 08 00 34 12 03
+- AUTO：7E A2 04 09 01 B0
+
+ACK：
+- 对象0x01 OK：7E A2 04 00 01 A7
+- 对象0x06 OK：7E A2 04 00 06 AC
+- 对象0x07 OK：7E A2 04 00 07 AD
+- 对象0x08 OK：7E A2 04 00 08 AE
+- 对象0x09 OK：7E A2 04 00 09 AF
+- 风机AUTO锁定：7E A2 04 0B 06 B7
+
+十九、已知兼容性与边界
+======================
+
+1. 0x01、0x02、0x04以及0x06的OFF/DUTY/SPEED使用最低长度检查，可能接受尾部额外字节；0x06 CLEAR_FAULT严格长度。
+2. 0x07、0x08、0x09控制使用严格长度。
+3. 0x06只有DATA恰好为“06 01”时返回扩展V1，恰好为“06 02”时返回健康V2；其他0x06查询返回旧18字节。
+4. 坏CHECKSUM、非法LENGTH、帧内超时和未知TYPE可能没有错误回复，必须使用请求超时。
+5. 风门/单总线控制ACK成功不代表异步动作已完成。
+6. 上位机显示RPM可能经过平均，与协议中的actual_rpm或rpm_error瞬时值不同；协议层必须保留原始值。
+7. 当前step20风门全行程为1700步、速度300 PPS；解析器应优先使用响应中的full_travel_steps/configured_pps，不要把配置值写死到通用协议库中。

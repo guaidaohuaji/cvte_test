@@ -1,0 +1,4 @@
+auto fan profile tests passed
+fan startup boost tests passed
+auto fan closed-loop tests passed
+fan auto step-15 sanitizer verification passed

@@ -1,0 +1,76 @@
+Fan Health Step18 Phase1 Host Test Log
+Generated: 2026-07-27
+
+== New fan health tests ==
+auto fan profile tests passed
+fan health shadow phase-1 tests passed
+fan health shadow phase-1 tests passed
+fan health step-18 phase-1 host verification passed
+
+== Regression: fan auto ==
+auto fan profile tests passed
+fan startup boost tests passed
+auto fan closed-loop tests passed
+fan auto step-15 host verification passed
+
+== Regression: fan BPF ==
+DC RMS: 0.024994
+Gain 10 Hz: 0.174531
+Gain 33.33 Hz: 0.994117
+Gain 50 Hz: 0.999713
+Gain 76.67 Hz: 0.928682
+Gain 150 Hz: 0.323905
+50 Hz + 1 kHz composite RMS: 353.439972
+33.33 Hz + 1 Hz baseline drift RMS: 563.291321
+Tach 33.33 Hz: valid=1 f=33334 mHz rpm=1000 period=300 hyst=118.803
+Tach 76.67 Hz: valid=1 f=76666 mHz rpm=2300 period=130
+Tach 50 Hz + drift + 1 kHz: valid=1 f=50000 mHz rpm=1500
+Tach amplitude changes: valid=1 f=33333 mHz rpm=1000 rejects=0
+Tach step 33->60 Hz: valid=1 f=60000 mHz resync=1 inconsistent=2
+Tach 20 Hz rejection: valid=0 long=26
+Tach 100 Hz rejection: valid=0 short=133
+Tach timeout after signal loss: valid=0 timeout=1 rms=0.042
+fan BPF and filtered tach host tests passed
+fan feedback reset semantics tests passed
+fan feedback source arbitration tests passed
+fan feedback full-chain integration tests passed
+fan feedback source arbitration tests passed
+fan feedback source arbitration tests passed
+fan BPF stage-3 host verification passed
+
+== Regression: manual fan phase1 ==
+manual fan RPM controller phase-1 tests passed
+manual fan RPM controller phase-1 host verification passed
+
+== Regression: manual fan phase2 ==
+app_uart fan manual RPM protocol tests passed
+manual fan RPM controller phase-1 tests passed
+manual fan RPM controller phase-1 host verification passed
+auto fan profile tests passed
+fan startup boost tests passed
+auto fan closed-loop tests passed
+fan auto step-15 host verification passed
+DC RMS: 0.024994
+Gain 10 Hz: 0.174531
+Gain 33.33 Hz: 0.994117
+Gain 50 Hz: 0.999713
+Gain 76.67 Hz: 0.928682
+Gain 150 Hz: 0.323905
+50 Hz + 1 kHz composite RMS: 353.439972
+33.33 Hz + 1 Hz baseline drift RMS: 563.291321
+Tach 33.33 Hz: valid=1 f=33334 mHz rpm=1000 period=300 hyst=118.803
+Tach 76.67 Hz: valid=1 f=76666 mHz rpm=2300 period=130
+Tach 50 Hz + drift + 1 kHz: valid=1 f=50000 mHz rpm=1500
+Tach amplitude changes: valid=1 f=33333 mHz rpm=1000 rejects=0
+Tach step 33->60 Hz: valid=1 f=60000 mHz resync=1 inconsistent=2
+Tach 20 Hz rejection: valid=0 long=26
+Tach 100 Hz rejection: valid=0 short=133
+Tach timeout after signal loss: valid=0 timeout=1 rms=0.042
+fan BPF and filtered tach host tests passed
+fan feedback reset semantics tests passed
+fan feedback source arbitration tests passed
+fan feedback full-chain integration tests passed
+fan feedback source arbitration tests passed
+fan feedback source arbitration tests passed
+fan BPF stage-3 host verification passed
+manual fan RPM controller phase-2 host verification passed

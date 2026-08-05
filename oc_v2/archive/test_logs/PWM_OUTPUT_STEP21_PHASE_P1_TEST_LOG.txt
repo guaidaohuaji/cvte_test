@@ -1,0 +1,101 @@
+Step21 PWM output Phase P1 test log
+UTC 2026-07-28 10:09:32
+
+=== New PWM output host test ===
+general PWM output phase-P1 tests passed
+general PWM output phase-P1 tests passed
+app_uart fan control and health protocol tests passed
+general PWM output step-21 phase-P1 host verification passed
+
+=== Existing regressions ===
+--- Tests/run_fan_auto_host_test.sh ---
+auto fan profile tests passed
+fan startup and safety-lock tests passed
+auto fan closed-loop and safety-lock tests passed
+fan auto step-15 host verification passed
+--- Tests/run_fan_bpf_host_test.sh ---
+DC RMS: 0.024994
+Gain 10 Hz: 0.174531
+Gain 33.33 Hz: 0.994117
+Gain 50 Hz: 0.999713
+Gain 76.67 Hz: 0.928682
+Gain 150 Hz: 0.323905
+50 Hz + 1 kHz composite RMS: 353.439972
+33.33 Hz + 1 Hz baseline drift RMS: 563.291321
+Tach 33.33 Hz: valid=1 f=33334 mHz rpm=1000 period=300 hyst=118.803
+Tach 76.67 Hz: valid=1 f=76666 mHz rpm=2300 period=130
+Tach 50 Hz + drift + 1 kHz: valid=1 f=50000 mHz rpm=1500
+Tach amplitude changes: valid=1 f=33333 mHz rpm=1000 rejects=0
+Tach step 33->60 Hz: valid=1 f=60000 mHz resync=1 inconsistent=2
+Tach 20 Hz rejection: valid=0 long=26
+Tach 100 Hz rejection: valid=0 short=133
+Tach timeout after signal loss: valid=0 timeout=1 rms=0.042
+fan BPF and filtered tach host tests passed
+fan feedback reset semantics tests passed
+fan feedback source arbitration tests passed
+fan feedback full-chain integration tests passed
+fan feedback source arbitration tests passed
+fan feedback source arbitration tests passed
+fan BPF stage-3 host verification passed
+--- Tests/run_manual_fan_phase1_host_test.sh ---
+manual fan RPM controller phase-1 tests passed
+manual fan RPM controller phase-1 host verification passed
+--- Tests/run_manual_fan_phase2_host_test.sh ---
+app_uart fan control and health protocol tests passed
+manual fan RPM controller phase-1 tests passed
+manual fan RPM controller phase-1 host verification passed
+auto fan profile tests passed
+fan startup and safety-lock tests passed
+auto fan closed-loop and safety-lock tests passed
+fan auto step-15 host verification passed
+DC RMS: 0.024994
+Gain 10 Hz: 0.174531
+Gain 33.33 Hz: 0.994117
+Gain 50 Hz: 0.999713
+Gain 76.67 Hz: 0.928682
+Gain 150 Hz: 0.323905
+50 Hz + 1 kHz composite RMS: 353.439972
+33.33 Hz + 1 Hz baseline drift RMS: 563.291321
+Tach 33.33 Hz: valid=1 f=33334 mHz rpm=1000 period=300 hyst=118.803
+Tach 76.67 Hz: valid=1 f=76666 mHz rpm=2300 period=130
+Tach 50 Hz + drift + 1 kHz: valid=1 f=50000 mHz rpm=1500
+Tach amplitude changes: valid=1 f=33333 mHz rpm=1000 rejects=0
+Tach step 33->60 Hz: valid=1 f=60000 mHz resync=1 inconsistent=2
+Tach 20 Hz rejection: valid=0 long=26
+Tach 100 Hz rejection: valid=0 short=133
+Tach timeout after signal loss: valid=0 timeout=1 rms=0.042
+fan BPF and filtered tach host tests passed
+fan feedback reset semantics tests passed
+fan feedback source arbitration tests passed
+fan feedback full-chain integration tests passed
+fan feedback source arbitration tests passed
+fan feedback source arbitration tests passed
+fan BPF stage-3 host verification passed
+manual fan RPM controller phase-2 host verification passed
+--- Tests/run_fan_health_phase2_host_test.sh ---
+auto fan profile tests passed
+fan startup and safety-lock tests passed
+fan startup and safety-lock tests passed
+fan health formal shutdown phase-2 tests passed
+fan health formal shutdown phase-2 tests passed
+fan health step-19 phase-2 host verification passed
+--- Tests/run_fan_health_phase3_host_test.sh ---
+auto fan profile tests passed
+fan startup and safety-lock tests passed
+fan startup and safety-lock tests passed
+fan health formal shutdown phase-2 tests passed
+fan health formal shutdown phase-2 tests passed
+fan health step-19 phase-2 host verification passed
+app_uart fan control and health protocol tests passed
+app_uart fan control and health protocol tests passed
+fan health step-20 phase-3 W2 verification passed
+
+=== Static checks ===
+8:#define APP_PWM_MAX_FREQUENCY_HZ 840000U
+351:    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+876:        if (len != 8U) { send_error(TYPE_CONTROL, STATUS_LENGTH_ERROR, OBJ_PWM_OUT); return; }
+894:            if (!AppPwm_Configure(true, freq, duty))
+
+ARM toolchain availability:
+arm-none-eabi-gcc not available
+pwsh not available
